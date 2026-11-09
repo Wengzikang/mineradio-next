@@ -37,8 +37,14 @@ npm run check        # 语法检查
 
 ## 部署
 
-GitHub Pages（`.github/workflows/pages.yml`）：推送到 `main` 分支后自动构建并发布 `web/dist`。
-线上地址见仓库 Settings → Pages。
+GitHub Pages（经典模式，从 `main` 分支 `/docs` 目录发布）：改动 `web/public/` 后，
+先跑 `npm run build:web`，再把 `web/dist/` 同步到 `docs/`（`rm -rf docs && cp -r web/dist docs`），
+提交并推送到 `main`，Pages 随后自动发布。
+线上地址：https://wengzikang.github.io/mineradio-next/
+
+注：原 `.github/workflows/pages.yml`（Actions 模式）因当前 gh token 缺少 `workflow` scope
+无法推送，已暂时移出仓库（内容见 git 历史 `366563b`）；以后执行 `gh auth refresh -s workflow`
+补齐 scope 后，可恢复该文件并把 Pages 切回 Actions 模式。
 
 ## 合规与限制（诚实说明）
 
