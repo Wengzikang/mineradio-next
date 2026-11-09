@@ -1,0 +1,9 @@
+node_modules/
+web/dist/
+release/
+.edge-test-profile/
+*.log
+*.tmp
+
+__pycache__/
+*.pyc

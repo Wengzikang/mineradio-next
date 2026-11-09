@@ -1,0 +1,14 @@
+{
+  "name": "starwave-music",
+  "version": "0.1.0",
+  "private": true,
+  "license": "GPL-3.0",
+  "description": "StarWave local-first visual music player.",
+  "scripts": {
+    "build:web": "node scripts/build-web.js",
+    "preview:web": "node scripts/preview-web.js",
+    "check": "node --check scripts/build-web.js && node --check scripts/preview-web.js"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
