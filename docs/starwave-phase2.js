@@ -718,6 +718,15 @@
     var def = null;
     for (var i = 0; i < RADIO_MOODS.length; i++) if (RADIO_MOODS[i].id === moodId) def = RADIO_MOODS[i];
     if (!def) def = RADIO_MOODS[0];
+    /* 登录后：电台队列只用歌单里的歌（洗牌取 20 首），不混演示曲目。 */
+    if (typeof starwaveNetEaseLoggedIn === 'function' && starwaveNetEaseLoggedIn() && typeof neteaseWebFetchMyPlaylistSongs === 'function') {
+      return neteaseWebFetchMyPlaylistSongs(60).catch(function () { return []; }).then(function (songs) {
+        var list = (songs || []).slice();
+        for (var i = list.length - 1; i > 0; i--) { var j = Math.floor(Math.random() * (i + 1)); var t = list[i]; list[i] = list[j]; list[j] = t; }
+        var queue = list.slice(0, 20);
+        return { queue: queue, def: def, counts: { demo: 0, neteaseFree: queue.length, itunes: 0 } };
+      });
+    }
     var jobs = [];
     var demos = [];
     try {
@@ -751,7 +760,7 @@
       if (moodId) { radioState.mood = moodId; self.mood = moodId; }
       toast('私人电台拼队列中…（' + moodLabel(radioState.mood) + '）');
       return buildRadioQueue(radioState.mood).then(function (built) {
-        if (!built.queue.length) { toast('电台队列为空：演示曲与公共源均不可用'); return null; }
+        if (!built.queue.length) { toast((typeof starwaveNetEaseLoggedIn === 'function' && starwaveNetEaseLoggedIn()) ? '电台队列为空：歌单里还没有可播的歌' : '电台队列为空：演示曲与公共源均不可用'); return null; }
         try {
           window.playQueue = built.queue.slice();
           window.currentIdx = -1;

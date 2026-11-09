@@ -16196,6 +16196,18 @@ async function loadHomePreviewSongs(force) {
   if (!PUBLIC_SOURCE_EXPERIMENTAL || homePreviewLoading || (homePreviewLoaded && !force)) return;
   homePreviewLoading = true;
   renderHomePreviewTracks();
+  /* 登录后：首页试听列表只放 Ma 自己歌单里的歌，不放演示曲目。 */
+  if (typeof starwaveNetEaseLoggedIn === 'function' && starwaveNetEaseLoggedIn() && typeof neteaseWebFetchMyPlaylistSongs === 'function') {
+    try {
+      var mySongs = await neteaseWebFetchMyPlaylistSongs(60);
+      homePreviewSongs = (mySongs || []).slice(0, 8).map(cloneSong);
+    } catch (err) { homePreviewSongs = []; }
+    homePreviewLoaded = true;
+    homePreviewLoading = false;
+    renderHomePreviewTracks();
+    renderHomeTiles();
+    return;
+  }
   try {
     var demoSongs = await buildStarwaveDemoSongs();
     homePreviewSongs = demoSongs.map(cloneSong);
@@ -26135,6 +26147,9 @@ async function logoutActiveAccount() {
 }
 async function doLogout() {
   if (typeof neteaseWebClearSession === 'function') neteaseWebClearSession();
+  /* 退出后清除歌单曲目缓存，首页试听列表恢复为演示曲目。 */
+  try { if (typeof neteaseWebClearMySongsCache === 'function') neteaseWebClearMySongsCache(); } catch (e) {}
+  try { if (typeof loadHomePreviewSongs === 'function') loadHomePreviewSongs(true); } catch (e) {}
   try {
     if (LOCAL_FIRST_MODE && connectorSupportsSavedAuth()) await connectorRequest('netease.clearAuth', {}, 6000);
     else await apiJson('/api/logout');

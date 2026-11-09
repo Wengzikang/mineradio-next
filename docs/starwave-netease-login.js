@@ -96,6 +96,9 @@ function neteaseWebApplyProfile(profile) {
   activeAccountProvider = 'netease';
   try { renderUserBtn(); } catch (e) {}
   try { refreshUserPlaylists(true); } catch (e) {}
+  /* 登录后：后台拉取歌单曲目（供首页/电台/DJ/推荐用），并重建首页试听列表为歌单里的歌。 */
+  try { neteaseWebFetchMyPlaylistSongs(80); } catch (e) {}
+  try { if (typeof loadHomePreviewSongs === 'function') loadHomePreviewSongs(true); } catch (e) {}
 }
 /* 带重试取账号资料：{ profile }（profile 为 null = 服务端确认凭证无效）；
  * { networkError }（网络失败，凭证本身可能有效，调用方不得删除）。 */
@@ -270,6 +273,58 @@ async function neteaseWebFetchPlaylistTracks(pid) {
   if (!data || data.code !== 200) throw new Error('歌单曲目加载失败');
   var songs = (data.songs || []).map(neteaseWebSongFromRecord).filter(function(s){ return s && s.name && s.id; });
   return { tracks: songs };
+}
+/* 登录后歌单里的歌：汇总 Ma 自己的歌单曲目（缓存 10 分钟），供首页试听、
+ * 电台、DJ、推荐在登录后替代演示曲目使用。只在登录态下调用；未登录返回 []。 */
+var neteaseWebMySongsCache = null;
+var neteaseWebMySongsAt = 0;
+var neteaseWebMySongsInflight = null;
+function neteaseWebMyPlaylistSongsCache() {
+  return neteaseWebMySongsCache ? neteaseWebMySongsCache.slice() : [];
+}
+function neteaseWebClearMySongsCache() {
+  neteaseWebMySongsCache = null; neteaseWebMySongsAt = 0; neteaseWebMySongsInflight = null;
+}
+async function neteaseWebLoadMyPlaylistSongs(limit) {
+  var out = [];
+  var seen = {};
+  var playlists = await neteaseWebFetchMyPlaylists();
+  for (var i = 0; i < playlists.length && out.length < limit; i++) {
+    var pl = playlists[i];
+    if (!pl || !pl.id) continue;
+    try {
+      var res = await neteaseWebFetchPlaylistTracks(pl.id);
+      (res.tracks || []).forEach(function(s){
+        if (!s || s.neteaseId == null) return;
+        var k = 'ne:' + s.neteaseId;
+        if (seen[k]) return; seen[k] = true;
+        out.push(s);
+      });
+    } catch (e) { /* 单个歌单失败不影响其他歌单 */ }
+    if (i >= 4) break; /* 最多拉 5 个歌单，避免登录后长时间等待 */
+  }
+  neteaseWebMySongsCache = out;
+  neteaseWebMySongsAt = Date.now();
+  return out;
+}
+async function neteaseWebFetchMyPlaylistSongs(limit) {
+  limit = Math.max(1, Number(limit) || 80);
+  if (!neteaseWebHasSession()) return [];
+  if (neteaseWebMySongsCache && (Date.now() - neteaseWebMySongsAt) < 600000) return neteaseWebMySongsCache.slice(0, limit);
+  if (neteaseWebMySongsInflight) {
+    var shared = await neteaseWebMySongsInflight;
+    return shared.slice(0, limit);
+  }
+  var p = neteaseWebLoadMyPlaylistSongs(limit);
+  neteaseWebMySongsInflight = p;
+  try {
+    var list = await p;
+    return list.slice(0, limit);
+  } catch (e) {
+    return [];
+  } finally {
+    neteaseWebMySongsInflight = null;
+  }
 }
 /* 三处歌单曲目加载点共用的守门函数：未登录或非网易云时返回 null，走原有逻辑。 */
 function neteaseWebPlaylistTracksFor(provider, pid) {

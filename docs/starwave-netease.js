@@ -174,7 +174,19 @@ function starwaveDemoSong(def, index) {
     trial: false
   };
 }
+/* 登录态判断（登录模块加载后可用；未加载时按未登录处理）：
+ * 登录后演示曲目全部隐藏，首页/电台/DJ/推荐改用歌单里的歌。 */
+function starwaveNetEaseLoggedIn() {
+  try {
+    if (typeof neteaseWebHasSession === 'function' && neteaseWebHasSession()) return true;
+  } catch (e) {}
+  try {
+    if (typeof loginStatus !== 'undefined' && loginStatus && loginStatus.loggedIn && loginStatus.provider === 'netease') return true;
+  } catch (e) {}
+  return false;
+}
 async function buildStarwaveDemoSongs() {
+  if (starwaveNetEaseLoggedIn()) return []; /* 登录后不展示演示曲目 */
   var songs = STARWAVE_DEMO_SONGS.map(starwaveDemoSong);
   await Promise.all(songs.map(function(song){
     if (!song.demoLrcUrl) return Promise.resolve();

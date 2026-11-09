@@ -345,6 +345,10 @@
       var hd = (typeof homeDiscoverState !== 'undefined') ? homeDiscoverState : null;
       if (hd && hd.songs) pool = pool.concat(hd.songs.map(cloneSongOf));
     } catch (e) { /* ignore */ }
+    try {
+      var my = (typeof neteaseWebMyPlaylistSongsCache === 'function') ? neteaseWebMyPlaylistSongsCache() : null;
+      if (my && my.length) pool = pool.concat(my.map(cloneSongOf));
+    } catch (e) { /* ignore */ }
     return dedupeSongs(pool);
   }
   function djLine(slot, mood, weather) {
@@ -353,14 +357,13 @@
     return line.replace('{weather}', weather.label || '好天气').replace('{city}', weather.city || '这里').replace('{mood}', mood || '放松');
   }
   /* 生成 DJ 歌单：天气电台 + 每日推荐 + 本地画像（常听歌手优先）+ 演示曲兜底。
-     全程本地规则，不调用任何模型服务。 */
+     登录后只用歌单里的歌（演示曲兜底不生效）。全程本地规则，不调用任何模型服务。 */
   function generateDj(opts) {
     opts = opts || {};
     var now = new Date();
     var slot = djTimeSlot(opts.hour != null ? opts.hour : now.getHours());
     var weather = djWeatherInfo();
     var mood = opts.mood && opts.mood !== 'auto' ? opts.mood : (weather.mood || slot.moods[0]);
-    var pool = djPoolSongs();
     var artists = djTopArtists(3);
     var picked = [];
     function take(list, n) {
@@ -370,34 +373,44 @@
         if (picked.indexOf(s) < 0) { picked.push(s); c++; }
       });
     }
-    /* 常听歌手优先 */
-    if (artists.length) {
-      artists.forEach(function (a) {
-        take(pool.filter(function (s) { return String(s.artist || '').indexOf(a) >= 0 || String(a).indexOf(s.artist || '') >= 0; }), 2);
+    function build(pool) {
+      /* 常听歌手优先 */
+      if (artists.length) {
+        artists.forEach(function (a) {
+          take(pool.filter(function (s) { return String(s.artist || '').indexOf(a) >= 0 || String(a).indexOf(s.artist || '') >= 0; }), 2);
+        });
+      }
+      /* 天气电台优先，其次每日推荐 */
+      take(pool, 12 - picked.length);
+      var p3 = P3();
+      var demoPromise = null;
+      function finish(demos) {
+        if (picked.length < 6 && demos && demos.length) take(demos, 12 - picked.length);
+        if (picked.length < 3 && demos && demos.length) take(demos, 12 - picked.length);
+        picked = dedupeSongs(picked).slice(0, 12);
+        var dj = {
+          slot: slot.id, slotLabel: slot.label, mood: mood,
+          weather: weather.label, city: weather.city,
+          line: djLine(slot, mood, weather),
+          generatedBy: '规则生成，非大模型',
+          songs: picked, createdAt: Date.now()
+        };
+        state.lastDj = dj;
+        return dj;
+      }
+      try {
+        demoPromise = p3 ? p3.demoSongs() : (typeof buildStarwaveDemoSongs === 'function' ? buildStarwaveDemoSongs() : Promise.resolve([]));
+      } catch (e) { demoPromise = Promise.resolve([]); }
+      return Promise.resolve(demoPromise).then(finish).catch(function () { return finish([]); });
+    }
+    /* 登录后：DJ 池只用歌单里的歌。 */
+    if (typeof starwaveNetEaseLoggedIn === 'function' && starwaveNetEaseLoggedIn() && typeof neteaseWebFetchMyPlaylistSongs === 'function') {
+      return neteaseWebFetchMyPlaylistSongs(60).catch(function () { return []; }).then(function (songs) {
+        var pool = (songs && songs.length) ? songs.map(cloneSongOf) : djPoolSongs();
+        return build(pool);
       });
     }
-    /* 天气电台优先，其次每日推荐 */
-    take(pool, 12 - picked.length);
-    var p3 = P3();
-    var demoPromise = null;
-    function finish(demos) {
-      if (picked.length < 6 && demos && demos.length) take(demos, 12 - picked.length);
-      if (picked.length < 3 && demos && demos.length) take(demos, 12 - picked.length);
-      picked = dedupeSongs(picked).slice(0, 12);
-      var dj = {
-        slot: slot.id, slotLabel: slot.label, mood: mood,
-        weather: weather.label, city: weather.city,
-        line: djLine(slot, mood, weather),
-        generatedBy: '规则生成，非大模型',
-        songs: picked, createdAt: Date.now()
-      };
-      state.lastDj = dj;
-      return dj;
-    }
-    try {
-      demoPromise = p3 ? p3.demoSongs() : (typeof buildStarwaveDemoSongs === 'function' ? buildStarwaveDemoSongs() : Promise.resolve([]));
-    } catch (e) { demoPromise = Promise.resolve([]); }
-    return Promise.resolve(demoPromise).then(finish).catch(function () { return finish([]); });
+    return build(djPoolSongs());
   }
   function playDj(dj) {
     dj = dj || state.lastDj;
@@ -414,14 +427,17 @@
 
   /* ---------- B. 混合推荐 ---------- */
   function neteaseRecommendSongs() {
-    /* 平台推荐：网易云 recommend_songs（公开 api-enhanced 服务，无登录）。
+    /* 平台推荐：网易云 recommend_songs（公开 api-enhanced 服务；登录后带 cookie 取 Ma 的每日推荐）。
        未登录时上游通常返回需登录，属实记录原因并回退本地混合推荐，不编数据。 */
     try {
       if (typeof neteaseWebFetchJson !== 'function' || typeof STARWAVE_NETEASE_API_BASE === 'undefined') {
         return Promise.resolve({ songs: [], reason: 'netease_api_unavailable' });
       }
+      var authQ = '';
+      try { if (typeof neteaseWebAuthQuery === 'function') authQ = neteaseWebAuthQuery(); } catch (e) {}
+      var recUrl = STARWAVE_NETEASE_API_BASE + '/recommend/songs' + (authQ ? ('?' + authQ.slice(1)) : '');
       return Promise.race([
-        neteaseWebFetchJson(STARWAVE_NETEASE_API_BASE + '/recommend/songs', 9000),
+        neteaseWebFetchJson(recUrl, 9000),
         new Promise(function (res) { setTimeout(function () { res(null); }, 9500); })
       ]).then(function (data) {
         if (!data || !data.data || !data.data.dailySongs || !data.data.dailySongs.length) {
@@ -462,14 +478,21 @@
     var p3 = P3();
     var demoP = null;
     try { demoP = p3 ? p3.demoSongs() : (typeof buildStarwaveDemoSongs === 'function' ? buildStarwaveDemoSongs() : Promise.resolve([])); } catch (e) { demoP = Promise.resolve([]); }
-    return Promise.all([platformP, Promise.resolve(demoP)]).then(function (res) {
+    /* 登录后：推荐首选歌单里的歌。 */
+    var loggedIn = (typeof starwaveNetEaseLoggedIn === 'function' && starwaveNetEaseLoggedIn());
+    var myP = (loggedIn && typeof neteaseWebFetchMyPlaylistSongs === 'function')
+      ? neteaseWebFetchMyPlaylistSongs(40).catch(function () { return []; })
+      : Promise.resolve([]);
+    return Promise.all([platformP, Promise.resolve(demoP), myP]).then(function (res) {
       var platform = res[0] || { songs: [], reason: 'recommend_failed' };
       var demos = res[1] || [];
-      var coldStart = local.length === 0 && platform.songs.length === 0;
+      var mySongs = res[2] || [];
+      var coldStart = local.length === 0 && platform.songs.length === 0 && mySongs.length === 0;
       var merged = [];
       /* 跨平台去重与可播性排序：可播（有地址/演示/试听）优先，其次平台推荐，其次本地画像 */
       var playable = function (s) { return !!(s.publicAudioUrl || s.previewUrl || s.provider === 'demo' || s.trial); };
       var buckets = [
+        mySongs,
         pool.filter(playable),
         platform.songs,
         local,
