@@ -124,3 +124,52 @@ DJ 生成的 6 首：樱花、茉莉花、Greensleeves、Amazing Grace、Clair d
 1. **手机手势修复**（建议修 Phase 4B）：两个手势目标在 ≤720px 下均不可见。可能修法（二选一或并行）：(a) 给 `#thumb-wrap.visible` 补一条 `display:flex` 规则，让左下小封面真正显示出来，手势随之可用；(b) 在手机竖屏默认视图另给一个可见的喜欢入口（如底栏爱心按钮）。修完后需在 390px 真机/移动端视口重测双击喜欢与真实长按。
 2. 本报告的手机长按项判定以探针为准（失败），与 `/tmp/sw-live-mobile.json` 中合成事件 PASS 口径不同——如需 JSON 与报告完全一致，可由后续修复验证时重跑覆盖。
 3. 除第 1 条外，线上站其余功能均已验证通过，无需其他动作。
+
+## 11. 修复后线上重跑（2026-11-10 约 00:03 CST，commit a2667c7）
+
+修复内容（见修复员报告）：`#thumb-wrap.visible` 补 `display:flex`；
+≤720px 下 `#thumb-wrap.visible` 浮于底栏之上（z-index:7，pointer-events 仅封面）。
+线上构建 `a2667c7` 状态 built；线上 index.html 1,481,968 字节，两个修复标记各 1 处。
+
+### 前置波折：中继再次失联后重启
+
+重跑首次启动即 `Page.goto: net::ERR_EMPTY_RESPONSE`。查明：中继 PID 20571
+在运行约 37 分钟后再次对 github.io 的 CONNECT 在 10 秒超时内无响应
+（与上一轮 PID 5434 约 45 分钟后失联的模式相同；两次检查均为 1 线程、
+0 条到上游的已建立连接，非资源耗尽；不经中继直连 egress 始终
+HTTP 200 约 1.4 秒）。协调员再次重启中继（新 PID 28380），探针
+HTTP 200 约 1.06 秒，随即重跑成功。**测试脚手架已知限制：中继闲置
+约 30–40 分钟后可能对 github.io 失联，重启即恢复；与应用无关，不影响线上站点。**
+
+### 桌面 1280×800：10/10 通过
+
+| 检查项 | 结果 |
+|---|---|
+| 加载（console / page / 失败请求） | ✅ 0 / 0 / 0，title=StarWave |
+| phase4b available / phase3 在 / phase4a 不在 | ✅ 0.4.0-phase4b，phase4a=false |
+| 演示曲樱花真实播放前进 | ✅ ct 2.76→4.73，前进 1.97s（线上 demo/sakura.mp3） |
+| 搜索“周杰伦” | ✅ 14 条：网易云 10 + Audius 4 |
+| 规则 AI DJ 生成 6 首并真实播放 | ✅ 6 首，“规则生成，非大模型”，播放前进 1.92s |
+| 混合推荐 | ✅ 20 首，platform=30，coldStart=false |
+| Spotify 授权 URL 格式（仅格式，不登录） | ✅ redirect_uri 为线上地址 |
+| 零汽水请求 | ✅ 中继日志增量 112 行 0 条；页面 59 请求 0 条 |
+| DESKTOP failures | **0**；唯一失败请求 1 条 = 已知 Audius 封面 ORB 拦截（`v.audius.rickyrombo.com/...1000x1000.jpg`，Phase 3 已记录为既有项，非回归） |
+
+### 手机 390×844：6/6 通过（第 5 节的两项失败已修复）
+
+| 检查项 | 结果 |
+|---|---|
+| 加载（console / page / 失败请求） | ✅ 0 / 0 / 0 |
+| 竖屏 portrait=true、歌单架 side | ✅ 通过 |
+| 演示曲真实播放前进 | ✅ ct 2.47→4.49，前进 2.02s |
+| 双击喜欢 0→1 | ✅ **通过**（真实 CDP 触摸，`cdp_real_double_tap`，before 0 → after 1） |
+| 长按菜单弹出 | ✅ **通过**（真实 CDP 触摸，touchStart 保持 750ms；JSON 与报告口径现已一致） |
+| 零汽水请求 | ✅ 中继日志增量 41 行 0 条；页面 28 请求 0 条 |
+| MOBILE failures | **0** |
+
+### 结论
+
+**TOTAL failures=0。** 第 5 节的手机手势失败已修复并在线上验证通过；
+本次重跑 JSON：`/tmp/sw-live-desktop.json`、`/tmp/sw-live-mobile.json`
+（已覆盖上一轮的手机 JSON）；运行日志 `/tmp/sw-live-rerun2.log`。
+线上验证至此全部通过，无未验证项（Spotify 真实登录按任务红线未走，不计为遗漏）。
