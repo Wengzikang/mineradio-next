@@ -568,7 +568,7 @@ body.desktop-shell.empty-home-active.controls-visible #empty-home{bottom:126px}
 
 /* ---------- 左下小封面 ---------- */
 #thumb-wrap{position:fixed;z-index:6;left:24px;bottom:24px;display:none;align-items:center;gap:14px;opacity:0;pointer-events:none;transition:opacity .8s ease}
-#thumb-wrap.visible{opacity:1;pointer-events:auto}
+#thumb-wrap.visible{display:flex;opacity:1;pointer-events:auto}
 #thumb-cover{width:64px;height:64px;border-radius:8px;object-fit:cover;background:rgba(255,255,255,0.05);box-shadow:0 8px 32px rgba(0,0,0,0.4);transition:transform .15s ease}
 #thumb-info{display:flex;flex-direction:column;gap:4px;max-width:250px;min-width:0}
 #thumb-title{font-size:13px;font-weight:500;color:rgba(255,255,255,0.92);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;transition:color .2s,text-shadow .2s}
@@ -761,6 +761,11 @@ body.diy-mode #controls{
 }
 @media (max-width:720px){
   .control-cover{display:none}
+  /* 小封面须浮在底栏之上才能被真实触摸点到（两者同为 z-index:6，底栏在 DOM
+     之后会盖住它）；但 wrap 只让封面本身接手势，标题区保持穿透，以免长标题
+     （最宽可达 352px）盖住底栏 modes 行的歌词/沉浸按钮。*/
+  #thumb-wrap.visible{z-index:7;pointer-events:none}
+  #thumb-wrap.visible #thumb-cover{pointer-events:auto}
   .control-track{max-width:min(210px,100%)}
   .control-meta{max-width:100%}
   .control-cluster.modes{gap:6px}
