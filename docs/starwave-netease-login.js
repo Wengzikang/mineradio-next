@@ -3,12 +3,17 @@
  *   801 等待扫码 / 802 已扫码待确认 / 803 成功（返回 cookie）/ 800 过期
  * 登录态只存在当前浏览器的 localStorage；不粘贴 Cookie、不解密、不碰 spade_a；
  * 不使用 music.163.com 的浏览器会话 Cookie；扫码由用户自己在网易云音乐 App 里完成。
+ * 2026-11-10 07:32 扫码后登录失败跟进：轮询丢一次 803 就过期、同步
+ * 账号资料网络失败会误删凭证——轮询失败当轮内重试、同步重试 3 次、
+ * 803 先存凭证再同步、网络失败不删凭证（刷新页可凭已存凭证恢复）。
  * GPL-3.0。 */
 var STARWAVE_NETEASE_COOKIE_KEY = 'starwave.netease.cookie';
 var STARWAVE_NETEASE_PROFILE_KEY = 'starwave.netease.profile';
 var neteaseWebQrTimer = null;
 var neteaseWebQrKey = null;
 var neteaseWebQrPolls = 0;
+var neteaseWebQrChecking = false;
+function neteaseWebSleep(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
 
 function neteaseWebLoginApiBase() {
   return (typeof STARWAVE_NETEASE_API_BASE !== 'undefined' && STARWAVE_NETEASE_API_BASE)
@@ -62,11 +67,11 @@ function neteaseWebQrStop() {
   neteaseWebQrKey = null;
   neteaseWebQrPolls = 0;
 }
+/* 取账号资料：网络异常时抛错（由调用方重试），只有服务端明确返回
+ * 无有效 profile 时才返回 null（凭证无效）。此前网络失败也返回 null，
+ * 调用方会误删已保存的登录凭证——扫码成功后一次网络抖动就白扫了。 */
 async function neteaseWebFetchProfile(cookie) {
-  var data;
-  try {
-    data = await neteaseWebApiJson('/user/account?cookie=' + encodeURIComponent(cookie), 12000, 'user/account');
-  } catch (e) { return null; }
+  var data = await neteaseWebApiJson('/user/account?cookie=' + encodeURIComponent(cookie), 20000, 'user/account');
   var p = data && data.profile;
   if (!p || !p.userId) return null;
   return {
@@ -92,8 +97,20 @@ function neteaseWebApplyProfile(profile) {
   try { renderUserBtn(); } catch (e) {}
   try { refreshUserPlaylists(true); } catch (e) {}
 }
+/* 带重试取账号资料：{ profile }（profile 为 null = 服务端确认凭证无效）；
+ * { networkError }（网络失败，凭证本身可能有效，调用方不得删除）。 */
+async function neteaseWebFetchProfileWithRetry(cookie) {
+  var lastErr = null;
+  for (var i = 0; i < 3; i++) {
+    try { return { profile: await neteaseWebFetchProfile(cookie) }; }
+    catch (e) { lastErr = e; if (i < 2) await neteaseWebSleep(1500); }
+  }
+  return { networkError: lastErr };
+}
 async function neteaseWebApplyCookie(cookie) {
-  var profile = await neteaseWebFetchProfile(cookie);
+  var res = await neteaseWebFetchProfileWithRetry(cookie);
+  if (res.networkError) return 'network';
+  var profile = res.profile;
   if (!profile) { neteaseWebClearSession(); return false; }
   try {
     window.localStorage.setItem(STARWAVE_NETEASE_COOKIE_KEY, cookie);
@@ -105,7 +122,9 @@ async function neteaseWebApplyCookie(cookie) {
 async function neteaseWebRestoreSession() {
   var cookie = neteaseWebReadCookie();
   if (!cookie) return false;
-  var profile = await neteaseWebFetchProfile(cookie);
+  var res = await neteaseWebFetchProfileWithRetry(cookie);
+  if (res.networkError) return false; /* 网络失败：保留已存凭证，下次加载再试 */
+  var profile = res.profile;
   if (!profile) { neteaseWebClearSession(); return false; }
   try { window.localStorage.setItem(STARWAVE_NETEASE_PROFILE_KEY, JSON.stringify(profile)); } catch (e) {}
   neteaseWebApplyProfile(profile);
@@ -159,16 +178,27 @@ async function neteaseWebQrStart() {
 }
 async function neteaseWebQrCheck() {
   if (!neteaseWebQrKey) return;
+  if (neteaseWebQrChecking) return; /* 上一轮还没回来时不叠加请求 */
+  neteaseWebQrChecking = true;
+  try {
   neteaseWebQrPolls++;
   if (neteaseWebQrPolls > 100) {
     neteaseWebQrStop();
     neteaseWebQrSetStatus('二维码已过期，请刷新', 'fail');
     return;
   }
-  var r;
-  try {
-    r = await neteaseWebApiJson('/login/qr/check?key=' + encodeURIComponent(neteaseWebQrKey), 20000, 'login/qr/check');
-  } catch (e) { return; }
+  /* 轮询失败立即重试：803 只在确认后短暂可取，一次网络抖动丢了
+   * 这一轮，下一次很可能已是 800（过期），等于白扫一次。 */
+  var r = null;
+  var checkErr = null;
+  for (var ci = 0; ci < 3; ci++) {
+    try {
+      r = await neteaseWebApiJson('/login/qr/check?key=' + encodeURIComponent(neteaseWebQrKey), 20000, 'login/qr/check');
+      checkErr = null;
+      break;
+    } catch (e) { checkErr = e; if (ci < 2) await neteaseWebSleep(800); }
+  }
+  if (checkErr) return; /* 本轮查不到，等下一轮，别把轮询停了 */
   if (!r) return;
   if (r.code === 800) {
     neteaseWebQrStop();
@@ -185,7 +215,14 @@ async function neteaseWebQrCheck() {
     }
     neteaseWebQrStop();
     neteaseWebQrSetStatus('登录成功，正在同步账号资料…', 'scan');
+    /* 先把凭证存下来再同步：同步因网络失败时，刷新页面可凭已存凭证
+     * 直接恢复登录，不用重新扫码。 */
+    try { window.localStorage.setItem(STARWAVE_NETEASE_COOKIE_KEY, r.cookie); } catch (e) {}
     var applied = await neteaseWebApplyCookie(r.cookie);
+    if (applied === 'network') {
+      neteaseWebQrSetStatus('扫码已确认，但同步账号资料失败（网络不稳定）。登录凭证已保存，刷新页面后一般会自动登录', 'fail');
+      return;
+    }
     if (!applied) {
       neteaseWebQrSetStatus('登录凭证无效，请刷新二维码重试', 'fail');
       return;
@@ -195,6 +232,7 @@ async function neteaseWebQrCheck() {
       try { showToast('欢迎 ' + (loginStatus.nickname || '')); } catch (e) {}
     }, 600);
   }
+  } finally { neteaseWebQrChecking = false; }
 }
 async function neteaseWebFetchMyPlaylists() {
   var profile = neteaseWebReadProfile();
