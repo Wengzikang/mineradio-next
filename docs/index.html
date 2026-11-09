@@ -217,11 +217,12 @@ body.empty-home-active.diy-mode #search-area:not(.has-results) #search-mode-tabs
 .tag-source.kugou-extension{color:#ffd9a8;border-color:rgba(255,166,82,.34);background:rgba(255,166,82,.10)}
 .tag-source.kuwo,.tag-source.kuwo-extension{color:#d8f7ff;border-color:rgba(87,204,224,.34);background:rgba(87,204,224,.10)}
 .tag-source.local{color:#d5f5ff;border-color:rgba(157,184,207,.32);background:rgba(157,184,207,.095)}
+/* NOTE: #user-btn / #login-modal / #user-modal were removed from this list:
+   the login entry must stay visible, and the modals are already hidden by
+   .modal-mask{display:none} until .show — the !important hide made them
+   permanently unopenable (renderUserBtn/openGsapModal cannot beat it). */
 #splash-connector,
-#user-btn,
 #user-capsule-hide-btn,
-#login-modal,
-#user-modal,
 #heart-btn,
 #collect-btn,
 #quality-control,
@@ -2585,7 +2586,7 @@ html.control-glass-svg-ok #visual-guide-btn:hover{
       <div class="login-intro-body">导入本地音乐即可播放；公共源搜索作为实验入口，失败时不影响本地播放。</div>
     </div>
     <h2 id="login-modal-title">本地播放模式</h2>
-    <div id="login-modal-desc" class="desc">当前版本隐藏账号登录，保留本地导入和实验公共源搜索。</div>
+    <div id="login-modal-desc" class="desc">使用网易云音乐 App 扫码登录，可同步歌单、喜欢的歌与播放权限。</div>
     <div id="qr-shell" class="qr-shell">
       <img id="qr-img" src="" alt="">
       <button id="qq-web-login-card" class="qq-login-mark" type="button" onclick="openProviderWebLogin()"><b>QQ</b><span>打开官方扫码窗口</span></button>
@@ -2779,6 +2780,7 @@ html.control-glass-svg-ok #visual-guide-btn:hover{
 </div>
 
 <script src="starwave-netease.js"></script>
+<script src="starwave-netease-login.js"></script>
 <script>
 'use strict';
 
@@ -14594,7 +14596,7 @@ function makeContentListManager() {
             ? await loadConnectorPlaylistData(playlistReq.provider, playlistReq.id, { timeoutMs: playlistConnectorTimeoutMs(playlistReq.provider) })
             : (playlistReq.provider === 'qq'
               ? await apiJson('/api/qq/playlist/tracks?id=' + encodeURIComponent(playlistReq.id))
-              : await apiJson('/api/playlist/tracks?id=' + encodeURIComponent(playlistReq.id))));
+              : ((typeof neteaseWebPlaylistTracksFor === 'function' ? await neteaseWebPlaylistTracksFor(playlistReq.provider, playlistReq.id) : null) || await apiJson('/api/playlist/tracks?id=' + encodeURIComponent(playlistReq.id)))));
       } catch (e) {
         if (!open || token !== requestToken) return;
         console.warn('[ShelfContentLoadApi]', playlistId, e);
@@ -21465,6 +21467,18 @@ function renderQueuePanel(opts) {
   renderMiniQueuePanel({ scrollCurrent: miniQueueOpen });
 }
 async function refreshUserPlaylists(force) {
+  if (typeof neteaseWebHasSession === 'function' && neteaseWebHasSession() && typeof neteaseWebFetchMyPlaylists === 'function') {
+    resetPlaylistPanelRenderLimit();
+    try {
+      var webLists = await neteaseWebFetchMyPlaylists();
+      homeDiscoverState.playlists = mergePlaylistRecords(importedSharedPlaylists.concat(webLists));
+      userPlaylists = mergePlaylistRecords(importedSharedPlaylists.concat(webLists, qqPlaylists));
+      renderUserPlaylistsList({ animate: isPlaylistPanelVisibleForRender(), reset: true });
+      if (typeof renderHomeDiscover === 'function') renderHomeDiscover();
+      if (typeof scheduleShelfRebuild === 'function') scheduleShelfRebuild('refresh-user-playlists', true);
+    } catch (e) { console.warn('[NeteaseWebPlaylists]', e); }
+    return;
+  }
   if (LOCAL_FIRST_MODE) {
     resetPlaylistPanelRenderLimit();
     var pod = document.getElementById('podcast-list');
@@ -21619,7 +21633,7 @@ async function openPlaylistPanelDetail(provider, pid, title) {
       ? await loadConnectorPlaylistData(provider, pid, { timeoutMs: playlistConnectorTimeoutMs(provider), url: pl.importUrl || '', text: pl.importUrl || '' })
       : (provider === 'qq'
         ? await apiJson('/api/qq/playlist/tracks?id=' + encodeURIComponent(pid))
-        : await apiJson('/api/playlist/tracks?id=' + encodeURIComponent(pid)));
+        : ((typeof neteaseWebPlaylistTracksFor === 'function' ? await neteaseWebPlaylistTracksFor(provider, pid) : null) || await apiJson('/api/playlist/tracks?id=' + encodeURIComponent(pid))));
     if (playlistPanelDetailState.token !== token) return;
     playlistPanelDetailState.loading = false;
     playlistPanelDetailState.tracks = (r && r.tracks || []).map(cloneSong);
@@ -21941,7 +21955,7 @@ async function loadPlaylistIntoQueueById(id, autoplay, title) {
       ? await loadConnectorPlaylistData(playlistReq.provider, playlistReq.id, { timeoutMs: playlistConnectorTimeoutMs(playlistReq.provider), url: importUrl, text: importUrl })
       : (playlistReq.provider === 'qq'
         ? await apiJson('/api/qq/playlist/tracks?id=' + encodeURIComponent(playlistReq.id))
-        : await apiJson('/api/playlist/tracks?id=' + encodeURIComponent(playlistReq.id)));
+        : ((typeof neteaseWebPlaylistTracksFor === 'function' ? await neteaseWebPlaylistTracksFor(playlistReq.provider, playlistReq.id) : null) || await apiJson('/api/playlist/tracks?id=' + encodeURIComponent(playlistReq.id))));
   } catch (e) {
     console.warn('[PlaylistLoadApi]', id, e);
     showToast('歌单加载失败');
@@ -25574,8 +25588,8 @@ function renderUserBtn() {
   } else {
     btn.classList.remove('logged-in');
     btn.classList.add('logged-out');
-    btn.title = '本地模式';
-    btn.innerHTML = '<span class="login-word">本地</span>';
+    btn.title = '登录网易云音乐';
+    btn.innerHTML = '<span class="login-word">登录</span>';
   }
   updatePlaybackQualityUi();
 }
@@ -25584,7 +25598,7 @@ async function showLoginModal(opts) {
   if (opts.provider) loginProvider = opts.provider === 'qq' ? 'qq' : 'netease';
   if (LOCAL_FIRST_MODE) {
     if (loginProvider === 'qq') qqManualCookieOpen = true;
-    else neteaseManualCookieOpen = true;
+    else if (typeof neteaseWebQrStart !== 'function') neteaseManualCookieOpen = true;
   }
   var modal = document.getElementById('login-modal');
   openGsapModal(modal);
@@ -25593,6 +25607,7 @@ async function showLoginModal(opts) {
 }
 function closeLoginModal() {
   stopQrPoll();
+  if (typeof neteaseWebQrStop === 'function') neteaseWebQrStop();
   closeGsapModal(document.getElementById('login-modal'));
 }
 function setLoginProvider(provider, silent) {
@@ -25618,7 +25633,8 @@ function updateLoginProviderUi() {
   var webShell = LOCAL_FIRST_MODE || isStarWaveWebShell();
   var qqAlreadyLogged = isQQ && !!(qqLoginStatus && qqLoginStatus.loggedIn);
   var neteaseAlreadyLogged = !isQQ && !!(loginStatus && loginStatus.loggedIn);
-  var useNeteaseCookie = !isQQ && (webShell || !canOpenNeteaseWeb);
+  var useNeteaseWebQr = !isQQ && !canOpenNeteaseWeb && typeof neteaseWebQrStart === 'function';
+  var useNeteaseCookie = !isQQ && !useNeteaseWebQr && (webShell || !canOpenNeteaseWeb);
   var importOpen = isQQ
     ? (qqManualCookieOpen || (!canOpenQQWeb && !qqAlreadyLogged))
     : (neteaseManualCookieOpen || (useNeteaseCookie && !neteaseAlreadyLogged));
@@ -25688,7 +25704,12 @@ function updateLoginProviderUi() {
 }
 async function refreshQr() {
   stopQrPoll();
+  if (typeof neteaseWebQrStop === 'function') neteaseWebQrStop();
   updateLoginProviderUi();
+  if (loginProvider === 'netease' && typeof neteaseWebQrStart === 'function' && !window.desktopWindow) {
+    await neteaseWebQrStart();
+    return;
+  }
   if (loginProvider === 'qq') {
     qrKey = null;
     var qqStatus = document.getElementById('qr-status');
@@ -26113,6 +26134,7 @@ async function logoutActiveAccount() {
   doLogout();
 }
 async function doLogout() {
+  if (typeof neteaseWebClearSession === 'function') neteaseWebClearSession();
   try {
     if (LOCAL_FIRST_MODE && connectorSupportsSavedAuth()) await connectorRequest('netease.clearAuth', {}, 6000);
     else await apiJson('/api/logout');

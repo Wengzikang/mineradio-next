@@ -1,10 +1,11 @@
 /* StarWave 网易云 + 演示曲目模块 (Phase 2 拆移至独立文件)
- * 原 index.html 第 2790-2971 行。网易云走公开 api-enhanced 社区服务，无登录、无 Cookie，仅免费曲。
+ * 原 index.html 第 2790-2971 行。网易云走公开 api-enhanced 社区服务；未登录仅免费曲，
+ * 登录后（扫码，见 starwave-netease-login.js）可用账号权限内曲目。
  * 演示曲目为 demo/ 下已核验的公有领域/CC 曲目。GPL-3.0。 */
-/* StarWave 网易云公开 API（与 Folia Web 相同方式：公开 api-enhanced 服务，无登录、无 Cookie） */
+/* StarWave 网易云公开 API（与 Folia Web 相同方式：公开 api-enhanced 服务；登录见 starwave-netease-login.js） */
 var STARWAVE_NETEASE_API_BASE = 'https://api-enhanced-pied-rho.vercel.app';
 
-/* StarWave 网易云 Web 接入（Phase 1）：与 Folia Web 相同方式，走公开 api-enhanced 服务，无登录、无 Cookie、无扩展 */
+/* StarWave 网易云 Web 接入（Phase 1）：与 Folia Web 相同方式，走公开 api-enhanced 服务，无扩展；登录态见 starwave-netease-login.js */
 var neteaseWebSearchError = '';
 function neteaseWebFetchJson(url, timeoutMs) {
   var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
@@ -93,7 +94,7 @@ async function fetchNeteaseWebPlayback(song) {
   if (!id) return { provider: 'netease-web', url: '', playable: false, reason: 'url_unavailable', message: '网易云没有可用歌曲 ID' };
   var data;
   try {
-    data = await neteaseWebFetchJson(STARWAVE_NETEASE_API_BASE + '/song/url/v1?id=' + encodeURIComponent(id) + '&level=standard', 12000);
+    data = await neteaseWebFetchJson(STARWAVE_NETEASE_API_BASE + '/song/url/v1?id=' + encodeURIComponent(id) + '&level=standard' + (typeof neteaseWebAuthQuery === 'function' ? neteaseWebAuthQuery() : ''), 12000);
   } catch (err) {
     return { provider: 'netease-web', url: '', playable: false, reason: 'netease_web_failed', message: '网易云播放地址请求失败：' + publicSourceErrorText(err) };
   }
