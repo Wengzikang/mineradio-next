@@ -124,20 +124,37 @@ async function neteaseWebQrStart() {
   if (shell) shell.classList.remove('web-login-preview');
   if (img) img.src = '';
   neteaseWebQrSetStatus('正在生成二维码…', '');
-  try {
-    var k = await neteaseWebApiJson('/login/qr/key', 12000, 'login/qr/key');
-    var unikey = k && k.data && k.data.unikey;
-    if (!unikey) throw new Error('获取 key 失败');
-    neteaseWebQrKey = unikey;
-    var q = await neteaseWebApiJson('/login/qr/create?key=' + encodeURIComponent(unikey) + '&qrimg=true', 15000, 'login/qr/create');
-    var qrimg = q && q.data && q.data.qrimg;
-    if (!qrimg) throw new Error('生成二维码失败');
-    if (img) img.src = qrimg;
-    neteaseWebQrSetStatus('请使用网易云音乐 App 扫码', '');
-    neteaseWebQrPolls = 0;
-    neteaseWebQrTimer = setInterval(neteaseWebQrCheck, 2000);
-  } catch (e) {
-    neteaseWebQrSetStatus('二维码生成失败：' + (e && e.message ? e.message : '网络异常') + '，请点“刷新二维码”重试', 'fail');
+  /* 2026-11-10 07:25 Ma 真机报 “Load failed”：手机 4G 下到 api-enhanced 的
+   * 请求在网络层失败（Vercel 域名在国内移动网络下常被重置/握手极慢）。
+   * 服务本身正常（同日稍早 VM 侧 key/create 均 200 且能拿到真实二维码），
+   * 因此加长超时并自动重试 3 次，失败时把“网络连不上接口”和“服务端
+   * 生成失败”分开提示；重试仍失败多半是当前网络打不开该服务。 */
+  var lastErr = null;
+  for (var attempt = 1; attempt <= 3; attempt++) {
+    try {
+      if (attempt > 1) neteaseWebQrSetStatus('正在生成二维码…（第 ' + attempt + ' 次重试）', '');
+      var k = await neteaseWebApiJson('/login/qr/key', 30000, 'login/qr/key');
+      var unikey = k && k.data && k.data.unikey;
+      if (!unikey) throw new Error('获取 key 失败');
+      neteaseWebQrKey = unikey;
+      var q = await neteaseWebApiJson('/login/qr/create?key=' + encodeURIComponent(unikey) + '&qrimg=true', 30000, 'login/qr/create');
+      var qrimg = q && q.data && q.data.qrimg;
+      if (!qrimg) throw new Error('生成二维码失败');
+      if (img) img.src = qrimg;
+      neteaseWebQrSetStatus('请使用网易云音乐 App 扫码', '');
+      neteaseWebQrPolls = 0;
+      neteaseWebQrTimer = setInterval(neteaseWebQrCheck, 2000);
+      return;
+    } catch (e) {
+      lastErr = e;
+      if (attempt < 3) await new Promise(function(r){ setTimeout(r, 1500); });
+    }
+  }
+  var msg = (lastErr && lastErr.message) ? lastErr.message : '网络异常';
+  if (/Load failed|Failed to fetch|NetworkError|Network request failed|aborted/i.test(msg)) {
+    neteaseWebQrSetStatus('网络连接失败：未能连上网易云接口，请点“刷新二维码”重试；若站内搜索也用不了，说明当前网络打不开该服务', 'fail');
+  } else {
+    neteaseWebQrSetStatus('二维码生成失败：' + msg + '，请点“刷新二维码”重试', 'fail');
   }
 }
 async function neteaseWebQrCheck() {
@@ -150,7 +167,7 @@ async function neteaseWebQrCheck() {
   }
   var r;
   try {
-    r = await neteaseWebApiJson('/login/qr/check?key=' + encodeURIComponent(neteaseWebQrKey), 12000, 'login/qr/check');
+    r = await neteaseWebApiJson('/login/qr/check?key=' + encodeURIComponent(neteaseWebQrKey), 20000, 'login/qr/check');
   } catch (e) { return; }
   if (!r) return;
   if (r.code === 800) {
