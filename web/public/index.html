@@ -2381,6 +2381,18 @@ html.control-glass-svg-ok #visual-guide-btn:hover{
     </div>
   </div>
 
+  <!-- Phase 5A P9(a)：浏览器存储占用（上游缓存设置页是桌面版专属，无法直搬；
+       这里是网页版改写：只读统计 + 只清网页缓存，不动歌单/设置/IndexedDB） -->
+  <div class="fx-section-label">存储占用</div>
+  <div class="sw5-storage" id="sw5-storage">
+    <div class="sw5-storage-text">浏览器存储：<span id="sw5-storage-value">正在统计…</span></div>
+    <div class="sw5-storage-note">清理缓存只删网页缓存（Service Worker / Cache Storage），不动歌单、设置与本地数据。</div>
+    <div class="sw5-storage-btns">
+      <button class="fx-mini-btn ghost" type="button" id="sw5-storage-refresh">刷新</button>
+      <button class="fx-mini-btn ghost" type="button" id="sw5-storage-clear">清理网页缓存</button>
+    </div>
+  </div>
+
   <div class="fx-actions">
     <button class="fx-mini-btn" onclick="resetFx()">恢复默认</button>
   </div>
@@ -6317,8 +6329,10 @@ void main(){
   //  Preset 5: WALLPAPER PULSE
   //  Layered music-particle wallpaper: aurora ribbons, depth sparks,
   //  and cover-colored audio flow.
+  //  Phase 5A: 上游同一分支覆盖预设 5–8（星河 / 星骸 / 两个新预设），
+  //  故由 else 收窄为 < 8.5，9–12 用下方新增分支。
   // ====================================================
-  else {
+  else if (uPreset < 8.5) {
     float bassGlow = smoothstep(0.07, 0.78, uBass) * 0.34 + uBeat * 0.014;
     float midGlow = smoothstep(0.07, 0.62, uMid) * 0.42;
     float highGlow = smoothstep(0.04, 0.46, uTreble) * 0.46;
@@ -6390,6 +6404,134 @@ void main(){
   }
 
   // ====================================================
+  //  Phase 5A 新增预设 9–12（GLSL 分支移植自上游 Mineradio v2.2.0
+  //  00-pointer-cover-particles.js，注释按 StarWave 命名重写；
+  //  预设 7–8 沿用上方壁纸分支，与上游着色器行为一致）。
+  //  Preset 9: 曜环 — 同心轨道光环
+  // ====================================================
+  else if (uPreset < 9.5) {
+float ringIndex = floor(aUv.y * 8.0);
+float ringLocal = fract(aUv.y * 8.0);
+float ringN = (ringIndex + 0.5) / 8.0;
+float ringSeed = hash11(ringIndex * 19.73 + 2.1);
+float theta = aUv.x * 2.0 * PI + ringIndex * 0.47 + t * (0.035 + ringN * 0.026);
+float eclipseDrive = smoothstep(0.06, 0.76, uBass) * 0.17 + uBeat * 0.08;
+float ridge = exp(-pow((ringLocal - 0.5) / (0.17 + ringSeed * 0.045), 2.0));
+float radius = 0.92 + ringN * 3.18 + (ringLocal - 0.5) * 0.24 + eclipseDrive * (0.18 + ringN * 0.34);
+float eccentric = 0.49 + ringN * 0.20;
+float xh = cos(theta) * radius * (1.18 + ringN * 0.10);
+float yh = sin(theta) * radius * eccentric;
+float zh = (ringN - 0.5) * 1.34 + sin(theta * 2.0 + ringSeed * 6.0) * (0.10 + ringN * 0.09);
+float tilt = -0.34 + ringN * 0.72;
+float ct = cos(tilt), st = sin(tilt);
+pos = vec3(xh, yh * ct - zh * st, yh * st + zh * ct);
+
+vec3 coldRim = vec3(0.48, 0.82, 1.0);
+vec3 antiqueGold = vec3(0.93, 0.72, 0.38);
+vec3 haloColor = mix(coldRim, antiqueGold, smoothstep(0.18, 0.84, ringN + sin(theta) * 0.08));
+haloColor = mix(haloColor, vec3(0.98, 0.96, 0.88), ridge * (0.28 + uTreble * 0.18));
+vColor = mix(coverColor * 0.72, haloColor, 0.62 + ridge * 0.20);
+float corona = pow(0.5 + 0.5 * sin(theta * (13.0 + ringIndex) - t * 0.52 + ringSeed * 9.0), 8.0);
+vAlpha = (0.18 + ridge * 0.74 + corona * (0.08 + uTreble * 0.18)) * smoothstep(0.02, 0.14, aUv.y) * (1.0 - smoothstep(0.93, 1.0, aUv.y));
+maxRippleAmp = max(maxRippleAmp, ridge * (0.12 + eclipseDrive * 0.20) + corona * uTreble * 0.13);
+  }
+
+  // ====================================================
+  //  Preset 10: 霓雨 — 折射城市雨丝
+  // ====================================================
+  else if (uPreset < 10.5) {
+float column = floor(aUv.x * 52.0);
+float columnN = (column + 0.5) / 52.0;
+float columnLocal = fract(aUv.x * 52.0);
+float rainSeed = hash11(column * 41.17 + floor(columnLocal * 5.0) * 7.9);
+float rainSpeed = 0.026 + rainSeed * 0.052 + smoothstep(0.08, 0.76, uBass) * 0.014;
+float fall = fract(1.0 - aUv.y + t * rainSpeed + rainSeed * 0.87);
+float xRain = (columnN - 0.5) * 11.8 + (columnLocal - 0.5) * 0.11;
+float yRain = (0.5 - fall) * 8.8;
+float cityDepth = mix(-3.8, 2.6, hash11(column * 11.3 + 0.7));
+float wind = sin(t * 0.17 + column * 0.63 + fall * 3.4) * (0.08 + rainSeed * 0.12);
+float perspective = 0.76 + smoothstep(-3.8, 2.6, cityDepth) * 0.34;
+pos = vec3((xRain + wind) * perspective, yRain, cityDepth + sin(fall * PI * 2.0 + rainSeed * 7.0) * 0.05);
+
+float dash = pow(0.5 + 0.5 * sin(fall * (52.0 + rainSeed * 38.0) - t * 0.32), 10.0);
+float dropHead = pow(0.5 + 0.5 * sin(fall * 17.0 + rainSeed * 12.0), 18.0);
+vec3 neonA = vec3(0.20, 0.88, 1.0);
+vec3 neonB = vec3(1.0, 0.26, 0.63);
+vec3 neonC = vec3(1.0, 0.72, 0.30);
+vec3 rainColor = mix(neonA, neonB, smoothstep(0.18, 0.78, rainSeed));
+rainColor = mix(rainColor, neonC, smoothstep(0.84, 0.99, rainSeed));
+vColor = mix(coverColor * 0.82, rainColor, 0.58 + dash * 0.18);
+vAlpha = 0.09 + dash * 0.40 + dropHead * (0.22 + uTreble * 0.30);
+vAlpha *= 0.58 + perspective * 0.42;
+pos.x += dropHead * sin(t * 0.8 + rainSeed * 8.0) * uTreble * 0.055;
+maxRippleAmp = max(maxRippleAmp, dash * uMid * 0.10 + dropHead * (0.10 + uTreble * 0.22));
+  }
+
+  // ====================================================
+  //  Preset 11: 光蝶 — 折纸翼阵迁徙
+  // ====================================================
+  else if (uPreset < 11.5) {
+float flockIndex = floor(aUv.y * 12.0);
+float wingY = fract(aUv.y * 12.0) * 2.0 - 1.0;
+float wingX = aUv.x * 2.0 - 1.0;
+float flockSeed = hash11(flockIndex * 23.73 + 4.0);
+float gx = mod(flockIndex, 4.0) - 1.5;
+float gy = floor(flockIndex / 4.0) - 1.0;
+float migrate = t * (0.018 + flockSeed * 0.018);
+vec2 flockCenter = vec2(gx * 2.42 + sin(migrate + flockSeed * 8.0) * 0.48,
+                        gy * 2.10 + cos(migrate * 0.83 + flockSeed * 9.0) * 0.36);
+float ax = abs(wingX);
+float wingMask = 1.0 - smoothstep(0.72, 1.18, abs(wingY) + ax * 0.38);
+float bodyMask = exp(-pow(wingX / 0.075, 2.0)) * (1.0 - smoothstep(0.62, 1.0, abs(wingY)));
+float flap = sin(t * (0.72 + flockSeed * 0.35) + flockIndex * 1.7) * (0.34 + uMid * 0.42 + uBeat * 0.16);
+float lx = sign(wingX) * (0.12 + pow(ax, 0.76) * 0.88);
+float ly = wingY * (0.48 + (1.0 - ax) * 0.22);
+float lz = ax * (0.42 + flap) + (1.0 - abs(wingY)) * 0.08;
+float heading = -0.20 + (flockSeed - 0.5) * 0.70;
+float ch = cos(heading), sh = sin(heading);
+vec2 folded = mat2(ch, -sh, sh, ch) * vec2(lx, ly);
+pos = vec3(flockCenter + folded, (flockSeed - 0.5) * 3.4 + lz);
+
+vec3 prismLeft = vec3(0.42, 0.94, 0.82);
+vec3 prismRight = vec3(0.96, 0.62, 0.92);
+vec3 prism = mix(prismLeft, prismRight, smoothstep(-0.8, 0.8, wingX));
+prism = mix(prism, vec3(1.0, 0.91, 0.64), smoothstep(0.72, 1.0, ax));
+vColor = mix(coverColor * 0.78, prism, 0.60 + wingMask * 0.18);
+vAlpha = wingMask * (0.22 + (1.0 - ax) * 0.42 + uTreble * 0.16) + bodyMask * 0.68;
+maxRippleAmp = max(maxRippleAmp, wingMask * (0.07 + abs(flap) * 0.12) + bodyMask * uBass * 0.12);
+  }
+
+  // ====================================================
+  //  Preset 12: 潮汐荧光 — 深海荧光花冠
+  // ====================================================
+  else {
+float bloomR = pow(aUv.y, 0.72);
+float bloomTheta = aUv.x * 2.0 * PI + bloomR * 0.72 + t * 0.018;
+float petalWave = 0.5 + 0.5 * cos(bloomTheta * 9.0 - bloomR * 3.8);
+float bloomDrive = smoothstep(0.06, 0.74, uBass) * 0.26 + uBeat * 0.10;
+float radiusBloom = bloomR * (3.30 + bloomDrive) * (0.78 + petalWave * 0.34);
+float petalFold = sin(bloomTheta * 9.0 - bloomR * 5.4 + t * 0.13);
+float bowl = (1.0 - bloomR) * 1.12 - bloomR * bloomR * 0.52;
+pos.x = cos(bloomTheta) * radiusBloom;
+pos.y = sin(bloomTheta) * radiusBloom * 0.82;
+pos.z = bowl + petalFold * (0.13 + bloomR * 0.47) + sin(bloomTheta * 3.0 + t * 0.07) * 0.08;
+float bloomTilt = -0.30;
+float cb = cos(bloomTilt), sb = sin(bloomTilt);
+pos.yz = mat2(cb, -sb, sb, cb) * pos.yz;
+
+vec3 abyss = vec3(0.12, 0.58, 0.56);
+vec3 violet = vec3(0.38, 0.32, 0.95);
+vec3 pearl = vec3(0.82, 1.0, 0.94);
+vec3 bloomColor = mix(abyss, violet, smoothstep(0.18, 0.88, bloomR + petalWave * 0.10));
+float luminousEdge = smoothstep(0.64, 0.98, bloomR) * (0.55 + petalWave * 0.45);
+bloomColor = mix(bloomColor, pearl, luminousEdge * (0.32 + uTreble * 0.22));
+vColor = mix(coverColor * 0.72, bloomColor, 0.68);
+float filament = pow(0.5 + 0.5 * sin(bloomTheta * 18.0 + bloomR * 19.0 - t * 0.26), 7.0);
+vAlpha = (0.16 + petalWave * 0.31 + filament * 0.26 + luminousEdge * 0.30) * smoothstep(0.01, 0.10, bloomR);
+maxRippleAmp = max(maxRippleAmp, petalWave * bloomDrive * 0.18 + filament * uTreble * 0.17 + luminousEdge * uMid * 0.09);
+  }
+
+  // ====================================================
   //  鼠标交互 (仅 SILK)
   // ====================================================
   if (uMouseActive > 0.5 && uPreset < 0.5) {
@@ -6454,6 +6596,7 @@ void main(){
   vBright = 0.82 + maxRippleAmp * 0.55 + uBass * 0.10 + edgeBoost * 0.30 + uEnergy * 0.05 + uBurstAmt * 0.40;
   if (uPreset > 4.5) {
     vBright = 0.94 + maxRippleAmp * 0.34 + uBass * 0.020 + uEnergy * 0.026 + uBurstAmt * 0.025;
+    if (uPreset > 8.5) vBright = 0.86 + maxRippleAmp * 0.52 + uEnergy * 0.045 + uBeat * 0.055; /* Phase 5A: 预设 9–12 亮度（移植自上游） */
   } else if (uPreset > 3.5) {
     vBright = 0.94 + maxRippleAmp * 0.64 + uBass * 0.08 + edgeBoost * 0.12 + uEnergy * 0.05 + uBeat * 0.16 + uBurstAmt * 0.16;
   }
@@ -19380,9 +19523,7 @@ async function fetchMusicSearchResults(q, mode) {
   }
   return fetchPublicSourceSearchResults(q);
 }
-function renderSongSearchResults(songs) {
-  playlist = songs || [];
-  $results.innerHTML = playlist.map(function(s, i){
+function searchResultRowHtml(s, i) {
     var vipTag = (s.fee > 0) ? '<span class="tag-vip">VIP</span>' : '';
     var sourceTag = songSourceTagHtml(s);
     var sourceClass = songProviderKey(s) + '-source';
@@ -19402,10 +19543,80 @@ function renderSongSearchResults(songs) {
       '<button class="song-action-btn" title="收藏到歌单" onclick="event.stopPropagation();collectSearchResult(' + i + ')">' + playlistPlusIconSvg() + '</button>' +
       '<button class="add-btn" title="下一首播放" onclick="event.stopPropagation();queueSearchResult(' + i + ')">+</button>' +
     '</div>';
-  }).join('');
+}
+function renderSongSearchResults(songs, opts) {
+  opts = opts || {};
+  songs = songs || [];
+  if (opts.append) {
+    /* Phase 5A 分页追加：只渲染新行并插到“加载更多”按钮之前，playlist 索引保持连续。 */
+    var base = playlist.length;
+    var html = songs.map(function(s, k){ return searchResultRowHtml(s, base + k); }).join('');
+    playlist = playlist.concat(songs);
+    var btn = searchLoadMoreButtonEl();
+    if (btn) btn.insertAdjacentHTML('beforebegin', html);
+    else $results.insertAdjacentHTML('beforeend', html);
+    $results.classList.add('show');
+    syncLikeStatusForSongs(playlist);
+    if (window.gsap) animateListItems($results, '.search-result', { x: 0, y: 6, stagger: 0.012, duration: 0.18, limit: 18 });
+    return;
+  }
+  playlist = songs;
+  $results.innerHTML = playlist.map(function(s, i){ return searchResultRowHtml(s, i); }).join('');
   $results.classList.add('show');
   syncLikeStatusForSongs(playlist);
   if (window.gsap) animateListItems($results, '.search-result', { x: 0, y: 6, stagger: 0.012, duration: 0.18, limit: 18 });
+  if (opts.search) updateSearchLoadMoreButton();
+}
+/* Phase 5A 搜索分页按钮（仅搜索结果区；歌单的 6 处“加载更多”不动）。
+ * 模式沿用上游 [data-search-load-more]，状态机在 starwave-netease.js。 */
+function searchLoadMoreButtonEl() {
+  return $results ? $results.querySelector('[data-search-load-more]') : null;
+}
+function updateSearchLoadMoreButton() {
+  if (!$results) return;
+  var btn = searchLoadMoreButtonEl();
+  var show = false;
+  try { show = isMusicSearchMode(searchMode) && typeof neteaseWebSearchHasMore === 'function' && neteaseWebSearchHasMore(); } catch (e) { show = false; }
+  if (!show) { if (btn) btn.remove(); return; }
+  if (!btn) {
+    btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'fx-mini-btn ghost search-load-more';
+    btn.setAttribute('data-search-load-more', '1');
+    btn.setAttribute('onclick', 'loadMoreSearchResults()');
+    $results.appendChild(btn);
+  }
+  btn.disabled = false;
+  btn.textContent = '加载更多';
+}
+async function loadMoreSearchResults() {
+  var btn = searchLoadMoreButtonEl();
+  if (!btn || btn.disabled) return;
+  if (typeof neteaseWebSearchLoadMore !== 'function') return;
+  var q = ($input && $input.value.trim()) || '';
+  if (!q || typeof neteaseWebSearchPage === 'undefined' || !neteaseWebSearchPage || neteaseWebSearchPage.query !== q) { updateSearchLoadMoreButton(); return; }
+  if (neteaseWebSearchPage.loading) return;
+  btn.disabled = true;
+  btn.textContent = '加载中…';
+  try {
+    var more = await neteaseWebSearchLoadMore();
+    var seen = {};
+    playlist.forEach(function(s){ if (s) seen[songProviderKey(s) + ':' + (s.mid || s.id || (s.name + '|' + s.artist))] = true; });
+    var fresh = (more || []).filter(function(s){
+      if (!s || !s.name) return false;
+      var key = songProviderKey(s) + ':' + (s.mid || s.id || (s.name + '|' + s.artist));
+      if (seen[key]) return false;
+      seen[key] = true;
+      return true;
+    });
+    if (fresh.length) renderSongSearchResults(fresh, { append: true });
+    else if (!(more || []).length) showToast('没有更多结果了');
+    updateSearchLoadMoreButton();
+  } catch (err) {
+    console.warn('[SearchLoadMore]', err);
+    showToast('加载更多失败，请稍后再试');
+    updateSearchLoadMoreButton();
+  }
 }
 
 async function doSearch(q, opts) {
@@ -19443,7 +19654,7 @@ async function doSearch(q, opts) {
     }
     searchLastResultQuery = searchResultKey(q, mode);
     rememberSearchQuery(q);
-    renderSongSearchResults(songs);
+    renderSongSearchResults(songs, { search: true });
     if (neteaseWebSearchError) showSourceFallbackNotice('网易云搜索失败', neteaseWebSearchError + '，当前仅显示试听推荐结果。');
     if (opts.autoPlayFirst) playSearchResult(0);
   } catch (err) {
@@ -23345,7 +23556,12 @@ function buildPresetGrid() {
   grid.innerHTML = order.map(function(i){
     var p = presetMeta[i];
     var desc = p.descHtml || p.desc;
-    return '<div class="preset-card" data-preset="' + i + '" onclick="setPreset(' + i + ')">' +
+    /* Phase 5A: accent 双色只做卡片配色（移植自上游），不做任何付费门控。 */
+    var cardClass = p.accent ? ' preset-card-accent' : '';
+    var cardStyle = p.accent
+      ? ' style="--preset-accent:' + p.accent + ';--preset-accent-2:' + (p.accent2 || p.accent) + '"'
+      : '';
+    return '<div class="preset-card' + cardClass + '" data-preset="' + i + '"' + cardStyle + ' onclick="setPreset(' + i + ')">' +
       '<div class="pc-icon">' + presetIcons[i] + '</div>' +
       '<div class="pc-name">' + p.name + '</div>' +
       '<div class="pc-desc">' + desc + '</div>' +
@@ -23414,8 +23630,13 @@ function setPreset(p, opts) {
     else if (p === 4) { orbit.userRadius = 6.5; orbit.userPhi = 0.04; orbit.userTheta = 0.0; orbit.baselineRadius = 6.5; orbit.baselinePhi = 0.04; }
     else if (p === 5) { orbit.userRadius = 9.4; orbit.userPhi = 0.34; orbit.userTheta = -0.52; orbit.baselineRadius = 9.4; orbit.baselinePhi = 0.34; }
     else if (p === 6) { orbit.userRadius = 7.4; orbit.userPhi = 0.10; orbit.userTheta = 0.18; orbit.baselineRadius = 7.4; orbit.baselinePhi = 0.10; }
+    /* Phase 5A: 预设 9–12 相机基线（移植自上游 defaultOrbitStateForPreset；7–8 沿用默认基线）。 */
+    else if (p === 9) { orbit.userRadius = 7.4; orbit.userPhi = 0.12; orbit.userTheta = -0.08; orbit.baselineRadius = 7.4; orbit.baselinePhi = 0.12; }
+    else if (p === 10) { orbit.userRadius = 7.15; orbit.userPhi = 0.02; orbit.userTheta = 0.0; orbit.baselineRadius = 7.15; orbit.baselinePhi = 0.02; }
+    else if (p === 11) { orbit.userRadius = 7.0; orbit.userPhi = 0.11; orbit.userTheta = 0.10; orbit.baselineRadius = 7.0; orbit.baselinePhi = 0.11; }
+    else if (p === 12) { orbit.userRadius = 7.35; orbit.userPhi = 0.18; orbit.userTheta = -0.12; orbit.baselineRadius = 7.35; orbit.baselinePhi = 0.18; }
     else              { orbit.userRadius = 6.6; orbit.userPhi = 0.08; orbit.userTheta = 0.0; orbit.baselineRadius = 6.6; orbit.baselinePhi = 0.08; }
-    orbit.baselineTheta = p === 5 ? -0.52 : (p === 6 ? 0.18 : 0.0);
+    orbit.baselineTheta = p === 5 ? -0.52 : (p === 6 ? 0.18 : (p === 9 ? -0.08 : (p === 11 ? 0.10 : (p === 12 ? -0.12 : 0.0))));
   }
   if (changed && !opts.silent) showToast('视觉预设: ' + presetMeta[p].name);
   var shouldCommitPlaybackPreset = !!opts.commitPlaybackPreset || !opts.noSave;
@@ -29301,5 +29522,6 @@ animate();
 <script src="starwave-phase2.js"></script>
 <script src="starwave-phase3.js"></script>
 <script src="starwave-phase4b.js"></script>
+<script src="starwave-phase5.js"></script>
 </body>
 </html>

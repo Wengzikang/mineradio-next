@@ -1,7 +1,9 @@
 /* StarWave 网易云模块 (Phase 2 拆移至独立文件)
  * 原 index.html 第 2790-2971 行。网易云走公开 api-enhanced 社区服务；未登录仅免费曲，
  * 登录后（扫码，见 starwave-netease-login.js）可用账号权限内曲目。
- * 演示曲目已于 2026-11-10 按 Ma 的要求全部删除。GPL-3.0。 */
+ * 演示曲目已于 2026-11-10 按 Ma 的要求全部删除。GPL-3.0。
+ * Phase 5A (2026-11-10)：搜索分页——fetchNeteaseWebSearchResults 支持 offset，
+ * 配合 index.html 的 [data-search-load-more] 按钮逐页追加（仅网易云单 provider）。 */
 /* StarWave 网易云公开 API（与 Folia Web 相同方式：公开 api-enhanced 服务；登录见 starwave-netease-login.js） */
 var STARWAVE_NETEASE_API_BASE = 'https://api-enhanced-pied-rho.vercel.app';
 
@@ -52,24 +54,63 @@ async function fillNeteaseWebCovers(songs) {
     console.warn('[NeteaseWebCover]', err);
   }
 }
-async function fetchNeteaseWebSearchResults(q) {
+async function fetchNeteaseWebSearchResults(q, offset) {
   neteaseWebSearchError = '';
+  offset = Math.max(0, Number(offset) || 0);
   var data;
   try {
-    data = await neteaseWebFetchJson(STARWAVE_NETEASE_API_BASE + '/search?keywords=' + encodeURIComponent(q) + '&limit=10', 12000);
+    data = await neteaseWebFetchJson(STARWAVE_NETEASE_API_BASE + '/search?keywords=' + encodeURIComponent(q) + '&limit=' + NETEASE_WEB_SEARCH_PAGE_SIZE + '&offset=' + offset, 12000);
   } catch (err) {
     neteaseWebSearchError = publicSourceErrorText(err);
     console.warn('[NeteaseWebSearch]', err);
     return [];
   }
   var list = (data && data.result && Array.isArray(data.result.songs)) ? data.result.songs : [];
+  /* Phase 5A 搜索分页状态：offset=0 的调用开启一轮新搜索并记录总数；
+   * 后续页（offset>0）只推进偏移量。总数取自 result.songCount，未返回时以页长判断。 */
+  if (offset === 0) {
+    neteaseWebSearchPage.query = String(q || '');
+    neteaseWebSearchPage.offset = 0;
+    neteaseWebSearchPage.total = (data && data.result && isFinite(Number(data.result.songCount))) ? Number(data.result.songCount) : -1;
+  } else {
+    neteaseWebSearchPage.offset = offset;
+  }
+  neteaseWebSearchPage.loading = false;
   if (data && data.code && data.code !== 200 && !list.length) {
     neteaseWebSearchError = '网易云搜索返回异常（code ' + data.code + '）';
     return [];
   }
   var songs = list.map(neteaseWebSongFromRecord).filter(function(song){ return song && song.name && song.id; });
+  neteaseWebSearchPage.lastCount = songs.length;
   await fillNeteaseWebCovers(songs);
   return songs;
+}
+/* Phase 5A 搜索分页状态机（仅网易云单 provider；其他源只贡献第 1 页）。
+ * 每页 NETEASE_WEB_SEARCH_PAGE_SIZE 条；hasMore 优先用 songCount 判断，
+ * 未返回 songCount 时以后备规则判断（上一页满页即可能还有下一页）。 */
+var NETEASE_WEB_SEARCH_PAGE_SIZE = 10;
+var neteaseWebSearchPage = { query: '', offset: 0, total: -1, lastCount: 0, loading: false };
+function neteaseWebSearchHasMore() {
+  if (!neteaseWebSearchPage.query) return false;
+  if (neteaseWebSearchPage.total >= 0) return (neteaseWebSearchPage.offset + NETEASE_WEB_SEARCH_PAGE_SIZE) < neteaseWebSearchPage.total;
+  return neteaseWebSearchPage.lastCount >= NETEASE_WEB_SEARCH_PAGE_SIZE;
+}
+async function neteaseWebSearchLoadMore() {
+  if (neteaseWebSearchPage.loading) return [];
+  var q = neteaseWebSearchPage.query;
+  if (!q) return [];
+  neteaseWebSearchPage.loading = true;
+  try {
+    var nextOffset = neteaseWebSearchPage.offset + NETEASE_WEB_SEARCH_PAGE_SIZE;
+    var songs = await fetchNeteaseWebSearchResults(q, nextOffset);
+    if (!songs.length) {
+      /* 空页即到头：把 total 收紧到当前偏移，避免反复空取。 */
+      neteaseWebSearchPage.total = neteaseWebSearchPage.offset;
+    }
+    return songs;
+  } finally {
+    neteaseWebSearchPage.loading = false;
+  }
 }
 async function findNeteaseWebTrialPreview(song) {
   try {
