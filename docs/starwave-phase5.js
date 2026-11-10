@@ -30,6 +30,41 @@
  *   相机基线、搜索分页按钮接线在 index.html / starwave-netease.js 内完成。
  * 登录 untouched；不含任何红线内容（无解密器 / 硬编码签名盐 / 安全 SDK /
  *   汽水会话端点 / QQ 逆向签名 / cookie 写入 / 硬编码密码）。
+ *
+ * Phase 5B / P3（2026-11-10）— 舞台歌词预热（单行预热缓存；设计 spike 结论：降级）。
+ * 移植来源：Mineradio v2.2.0（XxHuberrr/Mineradio-paused，GPL-3.0-only），
+ *   public/js/modules/02-visual/14-stage-lyrics-rendering.js（预热调度思想）。
+ * 修改者：StarWave Phase 5B 实施（2026-11-10）。GPL-3.0-only。
+ * Spike 映射证据（上游钩子 → StarWave 全局变量）：
+ *   - stageLyricPrewarmBuildGuardKey（样式键）→ prewarmStyleKey()：
+ *     stageLyrics.palette 四色 + fx.lyricColorMode/lyricColor/lyricLineHeight/
+ *     lyricScale/preset/lyricGlow；上游的 display/translation 模式 StarWave 没有，
+ *     不在键里（StarWave 舞台渲染器无此分支）。
+ *   - stageLyricRenderSignatureForCurrentState（需上游 00-state 存储）→ 改写为
+ *     trackSwitchToken + 归一化歌词文本 + prewarmStyleKey()；StarWave 无状态存储，
+ *     签名即缓存键，消费时再校验 token/style 双字段。
+ *   - markStageLyricsPlaybackResume → audio 元素 'play' 事件钩子 + 恢复时预热
+ *     当前行与下一行（prewarmOnResume）；'seeked' 事件同理预热跳转目标行。
+ *   - stageLyricSingleLinePrewarm（单行缓存，上限 10）→ 本文件单行缓存，
+ *     上限按 Phase 2 总督档位缩放（eco 0 / balanced 2 / high 4 / ultra 6），
+ *     触发点：切歌（wrap applyLyricsState）、恢复（audio 'play' + 暂停期间
+ *     轮询保温恢复行）、接近下一行（500ms 轮询，下一行 8 秒内到达即预热）。
+ *   - stageLyricFullTrackWarmup（整轨预热）→ 丢弃：依赖上游 payload/trackEntries
+ *     体系（buildStageLyricDisplayPayload），StarWave 没有；且 buildLyricMesh
+ *     每行分配一整套 canvas 纹理 + 着色器 + 132 个 spark 点，整轨预热会让
+ *     30–60 行网格常驻显存而渲染器又无逐出策略，搬它等于重构渲染器。
+ *     单行缓存覆盖真正会卡顿的热路径（下一行切换帧）。
+ *   - stageLyricResidentBuild / stageLyricResidentDemand（常驻构建）→ 丢弃：
+ *     同样 payload 耦合；单行缓存 + 恢复预热已覆盖其需求。
+ *   - stageLyricRestoreWarmup（恢复后预热）→ 见 markStageLyricsPlaybackResume 映射。
+ *   - 桌面渲染功率 / 系统内存分支 → 丢弃（静态站无此概念）；低端机保护改用
+ *     Phase 2 性能总督档位（eco 档预热完全关闭并清空缓存）。
+ * 实现方式：只包装（wrap）index.html 的 showStageLine / applyLyricsState，
+ *   不改 index.html 任何一行；buildLyricMesh 本身是 (文本, 调色板, fx) 的纯函数，
+ *   与行号无关，离线预建的网格与切换帧现场建的网格完全相同（age/state 在消费
+ *   时重置为 0/'in'）。行时间、偏移（__starwaveLyricOffsetSec）、歌词行内容
+ *   均不改动——预热只移动“建网格”发生的时刻。
+ * P2 已暂停（api-enhanced /lyric 不返回 yrc/ytlrc），本文件不碰任何 YRC 相关逻辑。
  */
 (function () {
   'use strict';
@@ -254,11 +289,370 @@
     setTimeout(refreshStorage, 600);
   })();
 
+  /* ---------- P3：舞台歌词预热（单行预热缓存） ----------
+   * 上游 14-stage-lyrics-rendering.js 的预热调度思想，回填进 StarWave 现有渲染器。
+   * 只做加法 + 包装：wrap showStageLine（消费缓存）与 applyLyricsState（切歌触发），
+   * 不改 index.html；不改行时间/偏移/歌词行内容；不碰 YRC（P2 已暂停）。
+   * 全部失败路径都回退到原有现场构建（wrapper 任何异常都调原函数）。 */
+  var PREWARM_MAX_TEXT_LEN = 160; /* 过长行不缓存 */
+  var PREWARM_WINDOW_SEC = 8;     /* 下一行 8 秒内到达即预热 */
+  var PREWARM_POLL_MS = 500;
+  var PREWARM_TIER_CAP = { eco: 0, balanced: 2, high: 4, ultra: 6 };
+  var PREWARM_DEFAULT_CAP = 4;
+
+  var prewarmState = {
+    items: {},      /* key -> { mesh, key, text, token, styleKey, reason, builtAt } */
+    order: [],      /* FIFO 逐出顺序 */
+    scheduled: {},  /* key -> setTimeout 句柄（已排队未建） */
+    lastTrackToken: null,
+    audioWired: false,
+    stats: {
+      builds: 0, hits: 0, misses: 0, evictions: 0, staleDiscards: 0,
+      buildErrors: 0, lastBuildMs: 0,
+      triggers: { 'track-switch': 0, resume: 0, 'next-line': 0, seek: 0 }
+    }
+  };
+
+  function prewarmNow() {
+    return (typeof performance !== 'undefined' && performance && performance.now) ? performance.now() : Date.now();
+  }
+  function prewarmNormalizeText(text) {
+    return String(text || '').replace(/\s+/g, ' ').trim();
+  }
+  /* 样式键：上游 stageLyricPrewarmBuildGuardKey 的 StarWave 改写（见文件头映射）。 */
+  function prewarmStyleKey() {
+    try {
+      var pal = (typeof stageLyrics !== 'undefined' && stageLyrics && stageLyrics.palette) || {};
+      var f = (typeof fx !== 'undefined' && fx) || {};
+      return [
+        f.lyricColorMode || '', f.lyricColor || '',
+        Number(f.lyricLineHeight) || 1, Number(f.lyricScale) || 1,
+        (f.preset == null ? '' : f.preset), f.lyricGlow ? 'glow' : 'noglow',
+        pal.primary || '', pal.secondary || '', pal.highlight || '', pal.glowColor || pal.glow || ''
+      ].join('|');
+    } catch (e) { return 'unknown'; }
+  }
+  function prewarmTrackToken() {
+    try { return (typeof trackSwitchToken !== 'undefined') ? trackSwitchToken : -1; } catch (e) { return -1; }
+  }
+  function prewarmCacheKey(text) {
+    return prewarmTrackToken() + '::' + prewarmNormalizeText(text) + '::' + prewarmStyleKey();
+  }
+  function prewarmGovernorTier() {
+    try {
+      if (window.starwavePerfGovernor && window.starwavePerfGovernor.tier) return window.starwavePerfGovernor.tier;
+    } catch (e) { /* ignore */ }
+    try {
+      if (typeof normalizePerformanceQuality === 'function') return normalizePerformanceQuality(window.fx && window.fx.performanceQuality);
+    } catch (e) { /* ignore */ }
+    return 'high';
+  }
+  function prewarmCapForTier(tier) {
+    var cap = PREWARM_TIER_CAP[String(tier || '').toLowerCase()];
+    return (typeof cap === 'number') ? cap : PREWARM_DEFAULT_CAP;
+  }
+  function prewarmCap() { return prewarmCapForTier(prewarmGovernorTier()); }
+  function prewarmEligible() {
+    try {
+      if (typeof fx === 'undefined' || !fx || !fx.particleLyrics) return false;
+      if (typeof stageLyrics === 'undefined' || !stageLyrics || !stageLyrics.group) return false;
+      if (typeof lyricsLines === 'undefined' || !lyricsLines || !lyricsLines.length) return false;
+      if (prewarmCap() <= 0) return false; /* eco 档：预热完全关闭 */
+      return true;
+    } catch (e) { return false; }
+  }
+  function prewarmDisposeItem(key) {
+    var item = prewarmState.items[key];
+    if (!item) return;
+    if (item.mesh) { try { if (typeof disposeLyricMesh === 'function') disposeLyricMesh(item.mesh); } catch (e) { /* ignore */ } }
+    delete prewarmState.items[key];
+  }
+  function prewarmClear() {
+    Object.keys(prewarmState.scheduled).forEach(function (k) {
+      try { clearTimeout(prewarmState.scheduled[k]); } catch (e) { /* ignore */ }
+    });
+    prewarmState.scheduled = {};
+    Object.keys(prewarmState.items).forEach(prewarmDisposeItem);
+    prewarmState.items = {};
+    prewarmState.order = [];
+  }
+  function prewarmEvictOldest() {
+    var cap = prewarmCap();
+    while (prewarmState.order.length > 0 && Object.keys(prewarmState.items).length >= cap) {
+      var oldest = prewarmState.order.shift();
+      if (prewarmState.items[oldest]) {
+        prewarmDisposeItem(oldest);
+        prewarmState.stats.evictions++;
+      }
+    }
+  }
+  function prewarmAudioTime() {
+    try {
+      if (typeof audio !== 'undefined' && audio) return Number(audio.currentTime || 0) + (window.__starwaveLyricOffsetSec || 0);
+    } catch (e) { /* ignore */ }
+    return 0;
+  }
+  /* 与 tickLyricsParticles 同一的行定位逻辑（t + 0.05 容差），只读不改。 */
+  function prewarmIndexAtTime() {
+    try {
+      if (typeof lyricsLines === 'undefined' || !lyricsLines || !lyricsLines.length) return -1;
+      var t = prewarmAudioTime();
+      var idx = -1;
+      for (var i = 0; i < lyricsLines.length; i++) {
+        if (Number(lyricsLines[i].t || 0) <= t + 0.05) idx = i; else break;
+      }
+      return idx;
+    } catch (e) { return -1; }
+  }
+  /* 上游 stageLyricSingleLinePrewarmDelay 的改写：离目标行越近，建得越早。 */
+  function prewarmDelayForLine(index) {
+    try {
+      var line = lyricsLines[index];
+      var until = line && isFinite(Number(line.t)) ? Math.max(0, Number(line.t) - prewarmAudioTime()) : 0;
+      if (until > 2.0) return 32;
+      if (until > 1.0) return 8;
+      return 0;
+    } catch (e) { return 0; }
+  }
+  function prewarmBuildLine(key, text, tokenAtSchedule, styleAtSchedule, reason) {
+    try {
+      if (!prewarmEligible()) return false;
+      if (prewarmTrackToken() !== tokenAtSchedule) return false; /* 切歌了 */
+      if (prewarmStyleKey() !== styleAtSchedule) return false;   /* 样式变了 */
+      if (prewarmState.items[key] && prewarmState.items[key].mesh) return true;
+      if (typeof buildLyricMesh !== 'function') return false;
+      var t0 = prewarmNow();
+      var finish = (typeof probeBegin === 'function') ? probeBegin('prewarm.build') : null;
+      var mesh = null;
+      try { mesh = buildLyricMesh(text); } finally { if (finish) finish(); }
+      var costMs = prewarmNow() - t0;
+      if (!mesh) return false;
+      prewarmEvictOldest();
+      if (Object.keys(prewarmState.items).length >= prewarmCap()) {
+        try { if (typeof disposeLyricMesh === 'function') disposeLyricMesh(mesh); } catch (e) { /* ignore */ }
+        return false;
+      }
+      prewarmState.items[key] = {
+        mesh: mesh, key: key, text: text,
+        token: tokenAtSchedule, styleKey: styleAtSchedule,
+        reason: reason, builtAt: Date.now()
+      };
+      prewarmState.order.push(key);
+      prewarmState.stats.builds++;
+      prewarmState.stats.lastBuildMs = Math.round(costMs * 100) / 100;
+      return true;
+    } catch (e) {
+      prewarmState.stats.buildErrors++;
+      return false;
+    }
+  }
+  /* 返回 'scheduled'（新排队）/ 'cached'（已有）/ false（拒绝）。 */
+  function prewarmScheduleLine(index, reason) {
+    try {
+      if (!prewarmEligible()) return false;
+      if (typeof lyricsLines === 'undefined' || !lyricsLines || index < 0 || index >= lyricsLines.length) return false;
+      var text = prewarmNormalizeText(lyricsLines[index] && lyricsLines[index].text);
+      if (!text || text.length > PREWARM_MAX_TEXT_LEN) return false;
+      var key = prewarmCacheKey(text);
+      if (prewarmState.items[key] && prewarmState.items[key].mesh) return 'cached';
+      if (prewarmState.scheduled[key]) return 'cached';
+      var tokenAtSchedule = prewarmTrackToken();
+      var styleAtSchedule = prewarmStyleKey();
+      var r = reason || 'next-line';
+      prewarmState.scheduled[key] = setTimeout(function () {
+        delete prewarmState.scheduled[key];
+        prewarmBuildLine(key, text, tokenAtSchedule, styleAtSchedule, r);
+      }, prewarmDelayForLine(index));
+      if (prewarmState.stats.triggers[r] != null) prewarmState.stats.triggers[r]++;
+      return 'scheduled';
+    } catch (e) { return false; }
+  }
+  /* 消费：签名（token + styleKey）不符即视为过期，销毁后回退现场构建。 */
+  function prewarmTakeMesh(text) {
+    var norm = prewarmNormalizeText(text);
+    if (!norm) return null;
+    var key = prewarmCacheKey(norm);
+    var item = prewarmState.items[key];
+    if (!item || !item.mesh) { prewarmState.stats.misses++; return null; }
+    delete prewarmState.items[key];
+    prewarmState.order = prewarmState.order.filter(function (k) { return k !== key; });
+    if (item.token !== prewarmTrackToken() || item.styleKey !== prewarmStyleKey()) {
+      try { if (typeof disposeLyricMesh === 'function') disposeLyricMesh(item.mesh); } catch (e) { /* ignore */ }
+      prewarmState.stats.staleDiscards++;
+      prewarmState.stats.misses++;
+      return null;
+    }
+    prewarmState.stats.hits++;
+    return item.mesh;
+  }
+  var prewarmLastLyricsFingerprint = '';
+  function prewarmLyricsFingerprint() {
+    try {
+      if (typeof lyricsLines === 'undefined' || !lyricsLines || !lyricsLines.length) return '';
+      var first = lyricsLines[0], last = lyricsLines[lyricsLines.length - 1];
+      return lyricsLines.length + '::' + (first.t || 0) + '::' + (first.text || '') +
+        '::' + (last.t || 0) + '::' + (last.text || '');
+    } catch (e) { return ''; }
+  }
+  function prewarmOnLyricsApplied(reason) {
+    var fp = prewarmLyricsFingerprint();
+    var tokenNow = prewarmTrackToken();
+    /* 同一曲目同一份歌词重复应用：不清缓存，只补调度，避免重复建网格。
+       token 变了（真切歌，即使同一首歌重播）一定走全清路径——旧 token 的
+       缓存键永远不再命中，留着只占显存。 */
+    if (fp && fp === prewarmLastLyricsFingerprint && tokenNow === prewarmState.lastTrackToken) {
+      var idx0 = prewarmIndexAtTime();
+      if (idx0 < 0) idx0 = 0;
+      prewarmScheduleLine(idx0, reason || 'track-switch');
+      if (idx0 + 1 < (lyricsLines || []).length) prewarmScheduleLine(idx0 + 1, reason || 'track-switch');
+      return;
+    }
+    prewarmLastLyricsFingerprint = fp;
+    prewarmState.lastTrackToken = tokenNow;
+    prewarmClear(); /* 新歌词 = 旧缓存全部过期 */
+    var idx = prewarmIndexAtTime();
+    if (idx < 0) idx = 0;
+    prewarmScheduleLine(idx, reason || 'track-switch');
+    if (idx + 1 < (lyricsLines || []).length) prewarmScheduleLine(idx + 1, reason || 'track-switch');
+  }
+  function prewarmOnResume(reason) {
+    var idx = prewarmIndexAtTime();
+    if (idx < 0) idx = 0;
+    /* 暂停时当前行已被移入 outgoing，恢复时它要重建——提前建好。 */
+    prewarmScheduleLine(idx, reason || 'resume');
+    if (idx + 1 < (lyricsLines || []).length) prewarmScheduleLine(idx + 1, reason || 'resume');
+  }
+  function prewarmOnSeek() {
+    var idx = prewarmIndexAtTime();
+    if (idx < 0) idx = 0;
+    prewarmScheduleLine(idx, 'seek');
+    if (idx + 1 < (lyricsLines || []).length) prewarmScheduleLine(idx + 1, 'seek');
+  }
+  function prewarmWireAudio() {
+    try {
+      if (prewarmState.audioWired) return true;
+      if (typeof audio === 'undefined' || !audio || typeof audio.addEventListener !== 'function') return false;
+      audio.addEventListener('play', function () { try { prewarmOnResume('resume'); } catch (e) { /* ignore */ } });
+      audio.addEventListener('seeked', function () { try { prewarmOnSeek(); } catch (e) { /* ignore */ } });
+      prewarmState.audioWired = true;
+      return true;
+    } catch (e) { return false; }
+  }
+  function prewarmPoll() {
+    try {
+      prewarmWireAudio();
+      if (prewarmCap() <= 0) {
+        /* eco 档：清空缓存，预热保持关闭（低端机不劣化）。 */
+        if (Object.keys(prewarmState.items).length || Object.keys(prewarmState.scheduled).length) prewarmClear();
+        return;
+      }
+      if (!prewarmEligible()) return;
+      var token = prewarmTrackToken();
+      if (prewarmState.lastTrackToken !== null && token !== prewarmState.lastTrackToken) prewarmClear();
+      prewarmState.lastTrackToken = token;
+      var idx = prewarmIndexAtTime();
+      if (idx < 0) idx = 0;
+      if (typeof audio !== 'undefined' && audio && audio.paused) {
+        /* 暂停期间把恢复行保温在缓存里：恢复那一帧 tick 会立刻重显当前行，
+           若等 'play' 事件才开始建，几乎一定赶不上——所以暂停时就提前建好。 */
+        prewarmScheduleLine(idx, 'resume');
+      }
+      var next = idx + 1;
+      if (next < lyricsLines.length) {
+        var until = Number(lyricsLines[next].t || 0) - prewarmAudioTime();
+        if (until <= PREWARM_WINDOW_SEC) prewarmScheduleLine(next, 'next-line');
+      }
+    } catch (e) { /* 轮询永不抛错 */ }
+  }
+  setInterval(prewarmPoll, PREWARM_POLL_MS);
+
+  /* wrap showStageLine：缓存命中时用预建网格，否则原样现场构建。 */
+  var prewarmOrigShowStageLine = (typeof showStageLine === 'function') ? showStageLine : null;
+  var prewarmShowStageLineWrapped = false;
+  if (prewarmOrigShowStageLine) {
+    try {
+      window.showStageLine = function (text, redrawOnly) {
+        try {
+          if (!redrawOnly && prewarmEligible()) {
+            var cached = prewarmTakeMesh(text);
+            if (cached) {
+              try { if (typeof createLyricsParticles === 'function') createLyricsParticles(); } catch (e) { /* ignore */ }
+              if (stageLyrics.group && text) {
+                if (stageLyrics.current) {
+                  stageLyrics.current.userData.state = 'out';
+                  stageLyrics.current.userData.age = 0;
+                  stageLyrics.outgoing.push(stageLyrics.current);
+                }
+                cached.userData = cached.userData || {};
+                cached.userData.age = 0;
+                cached.userData.state = 'in';
+                stageLyrics.currentText = String(text);
+                stageLyrics.group.add(cached);
+                stageLyrics.current = cached;
+                return;
+              }
+              /* group 消失或空文本：把已取出的网格放回销毁，走原函数。 */
+              try { if (typeof disposeLyricMesh === 'function') disposeLyricMesh(cached); } catch (e) { /* ignore */ }
+            }
+          }
+        } catch (e) { /* wrapper 任何异常都回退原函数 */ }
+        return prewarmOrigShowStageLine(text, redrawOnly);
+      };
+      prewarmShowStageLineWrapped = true;
+    } catch (e) { prewarmShowStageLineWrapped = false; }
+  }
+  /* wrap applyLyricsState：切歌 / 换歌词源时预热首行与下一行。 */
+  var prewarmOrigApplyLyricsState = (typeof applyLyricsState === 'function') ? applyLyricsState : null;
+  var prewarmApplyLyricsWrapped = false;
+  if (prewarmOrigApplyLyricsState) {
+    try {
+      window.applyLyricsState = function (lines, hasNativeKaraoke, timingSource) {
+        var ret = prewarmOrigApplyLyricsState(lines, hasNativeKaraoke, timingSource);
+        try { prewarmOnLyricsApplied('track-switch'); } catch (e) { /* ignore */ }
+        return ret;
+      };
+      prewarmApplyLyricsWrapped = true;
+    } catch (e) { prewarmApplyLyricsWrapped = false; }
+  }
+  function prewarmSnapshot() {
+    var items = [];
+    prewarmState.order.forEach(function (k) {
+      var it = prewarmState.items[k];
+      if (it) items.push({ key: k, text: it.text, reason: it.reason, builtAt: it.builtAt });
+    });
+    return {
+      version: '5b-p3',
+      wrapped: { showStageLine: prewarmShowStageLineWrapped, applyLyricsState: prewarmApplyLyricsWrapped },
+      audioWired: prewarmState.audioWired,
+      enabled: prewarmEligible(),
+      tier: prewarmGovernorTier(),
+      cap: prewarmCap(),
+      cacheSize: Object.keys(prewarmState.items).length,
+      scheduledCount: Object.keys(prewarmState.scheduled).length,
+      items: items,
+      stats: JSON.parse(JSON.stringify(prewarmState.stats)),
+      currentIdx: (typeof stageLyrics !== 'undefined' && stageLyrics) ? stageLyrics.currentIdx : -1,
+      lyricsLines: (typeof lyricsLines !== 'undefined' && lyricsLines) ? lyricsLines.length : 0,
+      trackToken: prewarmTrackToken()
+    };
+  }
+  var lyricPrewarm = {
+    version: '5b-p3',
+    snapshot: prewarmSnapshot,
+    schedule: prewarmScheduleLine,
+    clear: prewarmClear,
+    capForTier: prewarmCapForTier,
+    styleKey: prewarmStyleKey,
+    indexAtTime: prewarmIndexAtTime
+  };
+  window.starwaveLyricPrewarm = lyricPrewarm;
+
   /* ---------- 对外接口（供验证脚本与后续阶段使用） ---------- */
   window.starwavePhase5 = {
-    version: '5a',
+    version: '5b',
     available: true,
     presetsRegistered: presetsRegistered,
+    prewarm: lyricPrewarm,
     presets: {
       list: function () {
         try { return presetMeta.map(function (p, i) { return { index: i, name: p.name, desc: p.desc, accent: p.accent || null }; }); } catch (e) { return []; }
