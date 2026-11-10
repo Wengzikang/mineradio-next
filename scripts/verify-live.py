@@ -182,7 +182,7 @@ def play_fixture(page):
     if modal_open:
         page.keyboard.press('Escape')
         page.wait_for_timeout(500)
-    song = page.evaluate("() => { const s = window.currentLocalSong || (window.playQueue && window.playQueue[0]) || null; return s ? { name: s.name, publicAudioUrl: s.publicAudioUrl, provider: s.provider } : null; }")
+    song = page.evaluate("() => { const s = window.currentLocalSong || (window.playQueue && window.playQueue[0]) || null; return s ? { name: s.name, id: s.id, localKey: s.localKey, publicAudioUrl: s.publicAudioUrl, previewUrl: s.previewUrl, provider: s.provider, type: s.type } : null; }")
     page.evaluate("(song) => { if (!song) return; window.playQueue = [song]; window.currentIdx = 0; return playQueueAt(0, { manual: true }); }", song)
     page.wait_for_timeout(3000)
     t0 = audio_state(page)
@@ -192,7 +192,7 @@ def play_fixture(page):
     if t0.get('ct') is not None and t1.get('ct') is not None:
         advance = round(t1['ct'] - t0['ct'], 2)
     return {'played_index': 0, 'played_name': song['name'] if song else None,
-            't0': t0, 't1': t1, 'advance_sec': advance}
+            'song': song, 't0': t0, 't1': t1, 'advance_sec': advance}
 
 
 def search_jay(page):
@@ -281,8 +281,17 @@ def run_desktop(browser):
 
     page.evaluate("() => window.starwavePhase4b.openPanel('dj')")
     page.wait_for_timeout(800)
-    dj = page.evaluate("async () => { const d = await window.starwavePhase4b.dj.generate({}); return { songs: d.songs.length, line: d.line, by: d.generatedBy, names: d.songs.slice(0, 6).map(s => s.name) }; }")
-    if not check(report, 'dj.generate_6plus', bool(dj and dj['songs'] >= 6 and dj['by'] == '规则生成，非大模型'), dj):
+    # Seed the DJ pool with the fixture (demo songs deleted 2026-11-10: the
+    # cold-start pool is empty on the live site, so generate() returns 0).
+    page.evaluate("""(song) => {
+      if (!song) return { seeded: 0 };
+      const mk = (n) => Object.assign({}, song, { id: (song.localKey || song.id || 'fixture') + '#dj' + n, localKey: (song.localKey || song.id || 'fixture') + '#dj' + n, name: (song.name || 'fixture') + ' (DJ' + n + ')' });
+      const songs = [mk(1), mk(2), mk(3)];
+      if (typeof homeDiscoverState !== 'undefined') homeDiscoverState.songs = songs;
+      return { seeded: songs.length };
+    }""", demo.get('song'))
+    dj = page.evaluate("async () => { const d = await window.starwavePhase4b.dj.generate({}); return { songs: d.songs.length, line: d.line, by: d.generatedBy, names: d.songs.slice(0, 6).map(s => s.name), hasDemo: d.songs.some(s => s.provider === 'demo') }; }")
+    if not check(report, 'dj.generate_seeded', bool(dj and dj['songs'] >= 3 and dj['by'] == '规则生成，非大模型' and not dj['hasDemo']), dj):
         failures += 1
     page.evaluate("() => window.starwavePhase4b.dj.play()")
     page.wait_for_timeout(3000)
