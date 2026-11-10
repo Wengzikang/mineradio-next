@@ -123,11 +123,16 @@ async function neteaseWebSearchLoadMore() {
   var q = neteaseWebSearchPage.query;
   if (!q) return [];
   neteaseWebSearchPage.loading = true;
+  /* Round-2 fix (M1)：取页轮次快照——取页期间用户换了搜索，慢到的空页不得
+   * 收紧新搜索的 total（否则新搜索的分页被永久杀死）。 */
+  var mySeq = neteaseWebSearchSeq;
   try {
     var nextOffset = neteaseWebSearchPage.offset + NETEASE_WEB_SEARCH_PAGE_SIZE;
     var songs = await fetchNeteaseWebSearchResults(q, nextOffset);
-    if (!songs.length && neteaseWebSearchPage.lastFetchOk) {
-      /* 仅成功返回空页时收紧 total 到头；失败时保持原 total，按钮留给用户重试。 */
+    if (!songs.length && neteaseWebSearchPage.lastFetchOk
+        && mySeq === neteaseWebSearchSeq && neteaseWebSearchPage.query === q) {
+      /* 仅当空页仍属于当前搜索轮次时收紧 total 到头；失败时保持原 total，
+       * 按钮留给用户重试；慢请求后到时不碰新搜索的状态。 */
       neteaseWebSearchPage.total = neteaseWebSearchPage.offset;
     }
     return songs;

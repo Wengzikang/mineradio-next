@@ -21,6 +21,7 @@ Covers Phase 5A items:
     (b) mode switch / new search resets stale pagination (no phantom button);
     (c) clearCaches preserves the PWA shell cache starwave-pwa-v1;
     (d) presets 9-12 selectable with no new console/page (incl. WebGL) errors.
+    Round-2 (M1): stale empty load-more must not tighten the new search's total.
 Usage:
   ~/workspace/.venv-playwright/bin/python scripts/verify-phase5a.py [--smoke]
 --smoke: load + preset count + one search page only (no load-more click).
@@ -253,6 +254,11 @@ def main():
         if not check('p9r.clear_caches_preserves_pwa',
                      bool(cache_check['pwaKept'] and cache_check['junkGone']), cache_check):
             failures += 1
+        # Round-2 fix (L1): remove the probe entry left in the PWA shell cache.
+        try:
+            page.evaluate("async () => { const c = await caches.open('starwave-pwa-v1'); await c.delete('/__sw5a_probe'); }")
+        except Exception:
+            pass
 
         # ---- P6: search pagination (real network via relay) ----
         page.fill('#search-input', '周杰伦')
@@ -349,6 +355,47 @@ def main():
                          {'afterFail': after_fail, 'afterRetry': after_retry}):
                 failures += 1
 
+            # Round-2 fix (M1) regression: a stale empty load-more must not
+            # tighten the NEW search's total. Deterministic: the stale fetch
+            # is fulfilled empty by route interception, while the reset + new
+            # state write happen synchronously in the same JS task, so the
+            # response can only land after the new search's state is written.
+            # Without the fix, total would be tightened to 0 and the button lost.
+            page.unroute(search_url_pred, _fail_once)
+            race_state = {'n': 0}
+
+            def _empty_first_stale(route):
+                try:
+                    from urllib.parse import urlparse, parse_qs
+                    off = int(parse_qs(urlparse(str(route.request.url)).query).get('offset', ['0'])[0])
+                except Exception:
+                    off = 0
+                if off > 0 and race_state['n'] == 0:
+                    race_state['n'] += 1
+                    route.fulfill(status=200, content_type='application/json',
+                                  body='{"code":200,"result":{"songs":[],"songCount":0}}')
+                else:
+                    route.continue_()
+
+            page.route(search_url_pred, _empty_first_stale)
+            race = page.evaluate(
+                "async () => {"
+                " const p = neteaseWebSearchLoadMore();"
+                " resetNeteaseWebSearchPage();"
+                " neteaseWebSearchPage.query = '五月天';"
+                " neteaseWebSearchPage.offset = 0;"
+                " neteaseWebSearchPage.total = 500;"
+                " neteaseWebSearchPage.lastCount = 10;"
+                " const songs = await p;"
+                " updateSearchLoadMoreButton();"
+                " return { songs: songs.length, total: neteaseWebSearchPage.total,"
+                " query: neteaseWebSearchPage.query,"
+                " btn: !!document.querySelector('[data-search-load-more]') }; }")
+            page.unroute(search_url_pred, _empty_first_stale)
+            if not check('p6r.stale_empty_load_more_no_tighten',
+                         race['total'] == 500 and race['query'] == '五月天' and race['btn'], race):
+                failures += 1
+
         # ---- P6 review fix (b): mode switch / new search resets stale pagination ----
         if not smoke:
             # LOCAL_FIRST_MODE=true locks setSearchMode() to 'song' (index.html:
@@ -365,8 +412,8 @@ def main():
                     " query: (typeof neteaseWebSearchPage !== 'undefined' ? neteaseWebSearchPage.query : null),"
                     " btn: !!document.querySelector('[data-search-load-more]'),"
                     " rows: document.querySelectorAll('#search-results .search-result').length })")
-                if not check('p6r.mode_switch_resets_pagination',
-                             mode_state['query'] == '' and not mode_state['btn'], mode_state):
+                if not check('p6r.mode_switch_reset_path',
+                             mode_state['query'] == '' and not mode_state['btn'] and mode_state['rows'] == 0, mode_state):
                     failures += 1
             else:
                 page.evaluate("() => setSearchMode('netease')")
@@ -400,7 +447,7 @@ def main():
                 " btn: !!document.querySelector('[data-search-load-more]'),"
                 " rows: document.querySelectorAll('#search-results .search-result').length })")
             if not check('p6r.new_search_resets_pagination',
-                         newq['mode'] == 'song' and newq['query'] == '五月天' and newq['rows'] >= 1, newq):
+                         newq['mode'] == 'song' and newq['query'] == '五月天' and newq['rows'] >= 1 and newq['btn'], newq):
                 failures += 1
 
         # ---- light regression ----

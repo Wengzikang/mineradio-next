@@ -19602,9 +19602,13 @@ async function loadMoreSearchResults() {
   if (neteaseWebSearchPage.loading) return;
   btn.disabled = true;
   btn.textContent = '加载中…';
+  /* Round-2 fix (m1)：取页请求序号快照——同 query 重搜也会使序号变化，
+   * 仅比 query 会漏掉这种情形。 */
+  var reqSeq = (typeof searchRequestSeq !== 'undefined' ? searchRequestSeq : 0);
   try {
     var more = await neteaseWebSearchLoadMore();
     /* Phase 5A review fix：取页期间用户已开始新搜索/切换模式时，丢弃这批旧结果不追加。 */
+    if (reqSeq !== searchRequestSeq) { updateSearchLoadMoreButton(); return; }
     if (neteaseWebSearchPage.query !== q || ($input && $input.value.trim()) !== q) { updateSearchLoadMoreButton(); return; }
     var seen = {};
     playlist.forEach(function(s){ if (s) seen[songProviderKey(s) + ':' + (s.mid || s.id || (s.name + '|' + s.artist))] = true; });
