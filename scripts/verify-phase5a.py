@@ -16,6 +16,11 @@ Covers Phase 5A items:
     party failed requests (two documented pre-existing carve-outs: the
     /api/update/latest 404 from the update poller with no static backend,
     and third-party cover-image failures — see error-budget section below).
+  Phase 5A review-fix coverage (checks p6r/p9r/p1r):
+    (a) failed load-more keeps the button + retry then succeeds;
+    (b) mode switch / new search resets stale pagination (no phantom button);
+    (c) clearCaches preserves the PWA shell cache starwave-pwa-v1;
+    (d) presets 9-12 selectable with no new console/page (incl. WebGL) errors.
 Usage:
   ~/workspace/.venv-playwright/bin/python scripts/verify-phase5a.py [--smoke]
 --smoke: load + preset count + one search page only (no load-more click).
@@ -84,7 +89,7 @@ def ensure_relay():
         print('relay port open but probe failed -> restarting relay')
         _kill_relays()
     proc = subprocess.Popen([sys.executable, RELAY_SCRIPT],
-                            stdout=open('/tmp/sw-relay.log', 'w'), stderr=subprocess.STDOUT)
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for _ in range(30):
         if _port_open(RELAY_PORT) and _relay_probe_ok():
             return proc
@@ -97,9 +102,9 @@ def ensure_range_server():
         return None
     proc = subprocess.Popen(
         [sys.executable, RANGE_SCRIPT, str(RANGE_PORT)],
-        stdout=open('/tmp/sw-range.log', 'w'), stderr=subprocess.STDOUT)
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for _ in range(30):
-        if _port_open(RELAY_PORT):
+        if _port_open(RANGE_PORT):
             return proc
         time.sleep(0.2)
     raise RuntimeError('range server did not start')
@@ -186,6 +191,24 @@ def main():
         sel_ok = all(s.get('fx') == s.get('i') and s.get('u') == s.get('i') for s in sel)
         if not check('p1.new_presets_selectable', sel_ok, sel):
             failures += 1
+        # review fix (d): presets 9-12 selectable with no new console/page errors
+        # (WebGL failures surface as console errors from the renderer).
+        err_before = (len(report['console_errors']), len(report['page_errors']))
+        sel912 = page.evaluate(
+            "async () => { const out = [];"
+            " for (let i = 9; i <= 12; i++) {"
+            " try { setPreset(i, { silent: true, noSave: true, skipTransition: true });"
+            " await new Promise(r => setTimeout(r, 500));"
+            " out.push({ i: i, fx: (typeof fx !== 'undefined' ? fx.preset : -1),"
+            " u: (typeof uniforms !== 'undefined' && uniforms.uPreset ? uniforms.uPreset.value : -1) }); }"
+            " catch (e) { out.push({ i: i, err: String(e) }); } }"
+            " setPreset(0, { silent: true, noSave: true, skipTransition: true }); return out; }")
+        err_after = (len(report['console_errors']), len(report['page_errors']))
+        sel912_ok = all(s.get('fx') == s.get('i') and s.get('u') == s.get('i') for s in sel912)
+        if not check('p1r.presets_9_12_no_errors', sel912_ok and err_after == err_before,
+                     {'sel': sel912, 'consoleDelta': err_after[0] - err_before[0],
+                      'pageDelta': err_after[1] - err_before[1]}):
+            failures += 1
 
         # ---- P9: only confirmed gaps present ----
         storage = page.evaluate(
@@ -211,6 +234,23 @@ def main():
             " lyricColorPresets: (typeof lyricColorPresets !== 'undefined' ? lyricColorPresets.length : -1) })")
         if not check('p9.skip_evidence_lyric_color_colorlab', bool(skip_ev['lyricSwatches'] > 0 and skip_ev['colorLabPop']
                                                                     and skip_ev['lyricColorPresets'] == 18), skip_ev):
+            failures += 1
+        # review fix (c): clearCaches preserves the PWA shell cache starwave-pwa-v1
+        cache_check = page.evaluate(
+            "async () => {"
+            " const pwa = await caches.open('starwave-pwa-v1');"
+            " await pwa.put('/__sw5a_probe', new Response('probe'));"
+            " const junk = await caches.open('sw5a-junk-cache');"
+            " await junk.put('/__sw5a_junk', new Response('junk'));"
+            " const before = await caches.keys();"
+            " const deleted = await window.starwavePhase5.storage.clearCaches();"
+            " const after = await caches.keys();"
+            " const probe = await (await caches.open('starwave-pwa-v1')).match('/__sw5a_probe');"
+            " return { before: before, after: after, deleted: deleted,"
+            " pwaKept: after.includes('starwave-pwa-v1') && !!probe,"
+            " junkGone: !after.includes('sw5a-junk-cache') }; }")
+        if not check('p9r.clear_caches_preserves_pwa',
+                     bool(cache_check['pwaKept'] and cache_check['junkGone']), cache_check):
             failures += 1
 
         # ---- P6: search pagination (real network via relay) ----
@@ -249,6 +289,98 @@ def main():
                          {'before': len(keys1), 'after': len(keys2), 'idDupes': id_dupes, 'newIds': len(new_ids), 'state': state}):
                 failures += 1
             if not check('p6.offset_advanced', state['offset'] > 0, state):
+                failures += 1
+
+        # ---- P6 review fix (a): failed load-more keeps the button, retry succeeds ----
+        if not smoke and btn1:
+            fail_state = {'armed': False, 'failed': 0}
+            search_url_pred = lambda u: 'api-enhanced-pied-rho.vercel.app/search' in str(u)
+
+            def _fail_once(route):
+                if fail_state['armed'] and fail_state['failed'] == 0:
+                    fail_state['failed'] += 1
+                    route.abort()
+                else:
+                    route.continue_()
+
+            page.route(search_url_pred, _fail_once)
+            fail_state['armed'] = True
+            page_state = lambda: page.evaluate(
+                "() => ({ len: (window.playlist ? window.playlist.length : -1),"
+                " query: (typeof neteaseWebSearchPage !== 'undefined' ? neteaseWebSearchPage.query : null),"
+                " offset: (typeof neteaseWebSearchPage !== 'undefined' ? neteaseWebSearchPage.offset : -1),"
+                " total: (typeof neteaseWebSearchPage !== 'undefined' ? neteaseWebSearchPage.total : -1),"
+                " lastFetchOk: (typeof neteaseWebSearchPage !== 'undefined' ? neteaseWebSearchPage.lastFetchOk : null),"
+                " btn: (() => { const b = document.querySelector('[data-search-load-more]');"
+                " return b ? { visible: b.offsetParent !== null, disabled: b.disabled, text: b.textContent } : null; })() })")
+            before_fail = page_state()
+            page.click('[data-search-load-more]')
+            page.wait_for_timeout(1500)
+            after_fail = page_state()
+            toast_fail = page.evaluate("() => (document.getElementById('toast') || {}).textContent || ''")
+            fail_ok = (fail_state['failed'] == 1 and after_fail['len'] == before_fail['len']
+                       and after_fail['offset'] == before_fail['offset']
+                       and after_fail['total'] == before_fail['total']
+                       and after_fail['lastFetchOk'] is False
+                       and after_fail['btn'] and after_fail['btn']['visible']
+                       and not after_fail['btn']['disabled']
+                       and '加载更多失败' in toast_fail)
+            if not check('p6r.load_more_failure_keeps_button', fail_ok,
+                         {'before': before_fail, 'after': after_fail, 'toast': toast_fail,
+                          'aborted': fail_state['failed']}):
+                failures += 1
+            # retry with the failure disarmed: same button must now append page 3
+            fail_state['armed'] = False
+            page.click('[data-search-load-more]')
+            try:
+                page.wait_for_function(
+                    "(n) => (window.playlist ? window.playlist.length : 0) > n",
+                    arg=after_fail['len'], timeout=30000)
+            except Exception:
+                pass
+            page.wait_for_timeout(1500)
+            after_retry = page_state()
+            retry_ok = (after_retry['len'] > after_fail['len']
+                        and after_retry['offset'] > after_fail['offset']
+                        and after_retry['lastFetchOk'] is True)
+            if not check('p6r.load_more_retry_succeeds', retry_ok,
+                         {'afterFail': after_fail, 'afterRetry': after_retry}):
+                failures += 1
+
+        # ---- P6 review fix (b): mode switch / new search resets stale pagination ----
+        if not smoke:
+            page.evaluate("() => setSearchMode('netease')")
+            try:
+                page.wait_for_selector('#search-results .search-result', timeout=45000)
+            except Exception:
+                pass
+            page.wait_for_timeout(2000)
+            mode_state = page.evaluate(
+                "() => ({ mode: (typeof searchMode !== 'undefined' ? searchMode : '?'),"
+                " query: (typeof neteaseWebSearchPage !== 'undefined' ? neteaseWebSearchPage.query : null),"
+                " btn: !!document.querySelector('[data-search-load-more]'),"
+                " rows: document.querySelectorAll('#search-results .search-result').length })")
+            if not check('p6r.mode_switch_resets_pagination',
+                         mode_state['mode'] == 'netease' and mode_state['query'] == ''
+                         and not mode_state['btn'] and mode_state['rows'] >= 1, mode_state):
+                failures += 1
+            page.evaluate("() => setSearchMode('song')")
+            page.wait_for_timeout(500)
+            page.fill('#search-input', '五月天')
+            try:
+                page.wait_for_function(
+                    "() => (typeof neteaseWebSearchPage !== 'undefined' && neteaseWebSearchPage.query === '五月天')",
+                    timeout=30000)
+            except Exception:
+                pass
+            page.wait_for_timeout(1500)
+            newq = page.evaluate(
+                "() => ({ mode: (typeof searchMode !== 'undefined' ? searchMode : '?'),"
+                " query: (typeof neteaseWebSearchPage !== 'undefined' ? neteaseWebSearchPage.query : null),"
+                " btn: !!document.querySelector('[data-search-load-more]'),"
+                " rows: document.querySelectorAll('#search-results .search-result').length })")
+            if not check('p6r.new_search_resets_pagination',
+                         newq['mode'] == 'song' and newq['query'] == '五月天' and newq['rows'] >= 1, newq):
                 failures += 1
 
         # ---- light regression ----
@@ -290,8 +422,13 @@ def main():
         failures += 1
 
     report['failures'] = failures
-    with open(REPORT_PATH, 'w', encoding='utf-8') as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
+    try:
+        with open(REPORT_PATH, 'w', encoding='utf-8') as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
+    except OSError as e:
+        # Report is a convenience artifact; the verdict is the stdout checks
+        # + exit code, so a transient write failure must not mask the result.
+        print('WARN report write failed (%s); verdict stands on stdout checks' % e)
     print('FULL failures=%d console_errors=%d page_errors=%d failed_requests=%d' % (
         failures, len(report['console_errors']), len(report['page_errors']), len(report['failed_requests'])))
     if report['console_errors']:

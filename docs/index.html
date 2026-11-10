@@ -2386,7 +2386,7 @@ html.control-glass-svg-ok #visual-guide-btn:hover{
   <div class="fx-section-label">存储占用</div>
   <div class="sw5-storage" id="sw5-storage">
     <div class="sw5-storage-text">浏览器存储：<span id="sw5-storage-value">正在统计…</span></div>
-    <div class="sw5-storage-note">清理缓存只删网页缓存（Service Worker / Cache Storage），不动歌单、设置与本地数据。</div>
+    <div class="sw5-storage-note">清理缓存只删网页缓存（Service Worker / Cache Storage），不动歌单、设置与本地数据；离线外壳缓存 starwave-pwa-v1 会保留，离线打开不受影响。</div>
     <div class="sw5-storage-btns">
       <button class="fx-mini-btn ghost" type="button" id="sw5-storage-refresh">刷新</button>
       <button class="fx-mini-btn ghost" type="button" id="sw5-storage-clear">清理网页缓存</button>
@@ -18105,6 +18105,8 @@ function searchResultKey(q, mode) {
 }
 function clearSearchResults() {
   searchRequestSeq++;
+  /* Phase 5A review fix：清结果即丢弃旧分页状态，避免切换模式后残留“加载更多”。 */
+  if (typeof resetNeteaseWebSearchPage === 'function') resetNeteaseWebSearchPage();
   searchLastResultQuery = '';
   playlist = [];
   podcastResults = [];
@@ -19576,7 +19578,9 @@ function updateSearchLoadMoreButton() {
   if (!$results) return;
   var btn = searchLoadMoreButtonEl();
   var show = false;
-  try { show = isMusicSearchMode(searchMode) && typeof neteaseWebSearchHasMore === 'function' && neteaseWebSearchHasMore(); } catch (e) { show = false; }
+  /* Phase 5A review fix：只有歌曲模式真正跑过网易云取页（netease/qq 模式只走试听源），
+   * 非歌曲模式不显示分页按钮。 */
+  try { show = searchMode === 'song' && typeof neteaseWebSearchHasMore === 'function' && neteaseWebSearchHasMore(); } catch (e) { show = false; }
   if (!show) { if (btn) btn.remove(); return; }
   if (!btn) {
     btn = document.createElement('button');
@@ -19600,6 +19604,8 @@ async function loadMoreSearchResults() {
   btn.textContent = '加载中…';
   try {
     var more = await neteaseWebSearchLoadMore();
+    /* Phase 5A review fix：取页期间用户已开始新搜索/切换模式时，丢弃这批旧结果不追加。 */
+    if (neteaseWebSearchPage.query !== q || ($input && $input.value.trim()) !== q) { updateSearchLoadMoreButton(); return; }
     var seen = {};
     playlist.forEach(function(s){ if (s) seen[songProviderKey(s) + ':' + (s.mid || s.id || (s.name + '|' + s.artist))] = true; });
     var fresh = (more || []).filter(function(s){
@@ -19610,7 +19616,7 @@ async function loadMoreSearchResults() {
       return true;
     });
     if (fresh.length) renderSongSearchResults(fresh, { append: true });
-    else if (!(more || []).length) showToast('没有更多结果了');
+    else if (!(more || []).length) showToast(neteaseWebSearchPage.lastFetchOk ? '没有更多结果了' : '加载更多失败，请稍后再试');
     updateSearchLoadMoreButton();
   } catch (err) {
     console.warn('[SearchLoadMore]', err);
@@ -19636,6 +19642,8 @@ async function doSearch(q, opts) {
     return;
   }
   var requestSeq = ++searchRequestSeq;
+  /* Phase 5A review fix：新搜索先丢弃旧分页状态，避免慢请求/非歌曲模式残留“加载更多”。 */
+  if (typeof resetNeteaseWebSearchPage === 'function') resetNeteaseWebSearchPage();
   try {
     var mode = searchMode;
     if (isMusicSearchMode(mode)) {

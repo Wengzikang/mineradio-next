@@ -3,7 +3,10 @@
  * 登录后（扫码，见 starwave-netease-login.js）可用账号权限内曲目。
  * 演示曲目已于 2026-11-10 按 Ma 的要求全部删除。GPL-3.0。
  * Phase 5A (2026-11-10)：搜索分页——fetchNeteaseWebSearchResults 支持 offset，
- * 配合 index.html 的 [data-search-load-more] 按钮逐页追加（仅网易云单 provider）。 */
+ * 配合 index.html 的 [data-search-load-more] 按钮逐页追加（仅网易云单 provider）。
+ * Phase 5A review fixes (2026-11-10)：取页失败不再收紧 total（按钮可重试）；
+ * 请求序号守卫 + resetNeteaseWebSearchPage() 防慢请求/跨搜索状态泄漏。 */
+var neteaseWebSearchSeq = 0; /* 请求序号：慢请求后到时不写分页状态（见 fetchNeteaseWebSearchResults） */
 /* StarWave 网易云公开 API（与 Folia Web 相同方式：公开 api-enhanced 服务；登录见 starwave-netease-login.js） */
 var STARWAVE_NETEASE_API_BASE = 'https://api-enhanced-pied-rho.vercel.app';
 
@@ -57,15 +60,30 @@ async function fillNeteaseWebCovers(songs) {
 async function fetchNeteaseWebSearchResults(q, offset) {
   neteaseWebSearchError = '';
   offset = Math.max(0, Number(offset) || 0);
+  var mySeq = neteaseWebSearchSeq;
   var data;
   try {
     data = await neteaseWebFetchJson(STARWAVE_NETEASE_API_BASE + '/search?keywords=' + encodeURIComponent(q) + '&limit=' + NETEASE_WEB_SEARCH_PAGE_SIZE + '&offset=' + offset, 12000);
   } catch (err) {
+    /* 取页失败（网络异常/超时）：不写分页状态，调用方据 lastFetchOk=false 保留按钮供重试。 */
     neteaseWebSearchError = publicSourceErrorText(err);
+    neteaseWebSearchPage.lastFetchOk = false;
     console.warn('[NeteaseWebSearch]', err);
     return [];
   }
   var list = (data && data.result && Array.isArray(data.result.songs)) ? data.result.songs : [];
+  if (data && data.code && data.code !== 200 && !list.length) {
+    /* 服务端非 200 且无歌曲：同失败处理，不写分页状态。 */
+    neteaseWebSearchError = '网易云搜索返回异常（code ' + data.code + '）';
+    neteaseWebSearchPage.lastFetchOk = false;
+    return [];
+  }
+  var songs = list.map(neteaseWebSongFromRecord).filter(function(song){ return song && song.name && song.id; });
+  neteaseWebSearchPage.lastFetchOk = true;
+  if (mySeq !== neteaseWebSearchSeq) {
+    /* 慢请求后到（用户已开始新搜索/切换模式）：只返回结果供调用方丢弃，不写分页状态。 */
+    return songs;
+  }
   /* Phase 5A 搜索分页状态：offset=0 的调用开启一轮新搜索并记录总数；
    * 后续页（offset>0）只推进偏移量。总数取自 result.songCount，未返回时以页长判断。 */
   if (offset === 0) {
@@ -76,11 +94,6 @@ async function fetchNeteaseWebSearchResults(q, offset) {
     neteaseWebSearchPage.offset = offset;
   }
   neteaseWebSearchPage.loading = false;
-  if (data && data.code && data.code !== 200 && !list.length) {
-    neteaseWebSearchError = '网易云搜索返回异常（code ' + data.code + '）';
-    return [];
-  }
-  var songs = list.map(neteaseWebSongFromRecord).filter(function(song){ return song && song.name && song.id; });
   neteaseWebSearchPage.lastCount = songs.length;
   await fillNeteaseWebCovers(songs);
   return songs;
@@ -89,7 +102,17 @@ async function fetchNeteaseWebSearchResults(q, offset) {
  * 每页 NETEASE_WEB_SEARCH_PAGE_SIZE 条；hasMore 优先用 songCount 判断，
  * 未返回 songCount 时以后备规则判断（上一页满页即可能还有下一页）。 */
 var NETEASE_WEB_SEARCH_PAGE_SIZE = 10;
-var neteaseWebSearchPage = { query: '', offset: 0, total: -1, lastCount: 0, loading: false };
+var neteaseWebSearchPage = { query: '', offset: 0, total: -1, lastCount: 0, loading: false, lastFetchOk: false };
+/* Phase 5A review fix：新一轮搜索/切换模式前丢弃旧分页状态，并使在途慢请求失效。 */
+function resetNeteaseWebSearchPage() {
+  neteaseWebSearchSeq++;
+  neteaseWebSearchPage.query = '';
+  neteaseWebSearchPage.offset = 0;
+  neteaseWebSearchPage.total = -1;
+  neteaseWebSearchPage.lastCount = 0;
+  neteaseWebSearchPage.loading = false;
+  neteaseWebSearchPage.lastFetchOk = false;
+}
 function neteaseWebSearchHasMore() {
   if (!neteaseWebSearchPage.query) return false;
   if (neteaseWebSearchPage.total >= 0) return (neteaseWebSearchPage.offset + NETEASE_WEB_SEARCH_PAGE_SIZE) < neteaseWebSearchPage.total;
@@ -103,8 +126,8 @@ async function neteaseWebSearchLoadMore() {
   try {
     var nextOffset = neteaseWebSearchPage.offset + NETEASE_WEB_SEARCH_PAGE_SIZE;
     var songs = await fetchNeteaseWebSearchResults(q, nextOffset);
-    if (!songs.length) {
-      /* 空页即到头：把 total 收紧到当前偏移，避免反复空取。 */
+    if (!songs.length && neteaseWebSearchPage.lastFetchOk) {
+      /* 仅成功返回空页时收紧 total 到头；失败时保持原 total，按钮留给用户重试。 */
       neteaseWebSearchPage.total = neteaseWebSearchPage.offset;
     }
     return songs;

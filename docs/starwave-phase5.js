@@ -24,7 +24,8 @@
  *     性能总督（Phase 2）已覆盖按帧率自动降档；
  *   - 实时音频监视器（06-sonic-audio-monitor.js）：与 Phase 3 频谱/kick/BPM 重叠，跳过；
  *   - 缓存存储设置 UI：上游是桌面版专属（desktopWindow IPC + 本地路径 + 重启），
- *     网页版改写为 navigator.storage.estimate() 只读统计 + 只清 Cache Storage。
+ *     网页版改写为 navigator.storage.estimate() 只读统计 + 只清 Cache Storage
+ *     （保留离线外壳缓存 starwave-pwa-v1，见下）。
  * 本文件只做加法：向 presetMeta/presetIcons 追加数据并重建预设网格；GLSL 分支、
  *   相机基线、搜索分页按钮接线在 index.html / starwave-netease.js 内完成。
  * 登录 untouched；不含任何红线内容（无解密器 / 硬编码签名盐 / 安全 SDK /
@@ -198,7 +199,9 @@
    * 缓存路径 + 重启生效），静态站无对应物。这里只做两件网页上安全的事：
    *   ① navigator.storage.estimate() 只读统计；
    *   ② 清理 Cache Storage（Service Worker / 网页缓存），绝不动 localStorage、
-   *      IndexedDB（歌单/自定义背景/节拍缓存都在里面）。 */
+   *      IndexedDB（歌单/自定义背景/节拍缓存都在里面），也绝不动离线外壳缓存
+   *      starwave-pwa-v1（见 pwa-service-worker.js，删掉会断离线打开直到重新缓存）。
+   * Phase 5A review fix (2026-11-10)：clearCaches 排除 starwave-pwa-v1。 */
   function formatStorageBytes(value) {
     var bytes = Math.max(0, Number(value) || 0);
     if (bytes < 1024) return bytes + ' B';
@@ -224,13 +227,16 @@
       return null;
     });
   }
+  /* 离线外壳缓存名，必须与 pwa-service-worker.js 的 CACHE_NAME 一致；清理时排除。 */
+  var STARWAVE_PWA_CACHE_NAME = 'starwave-pwa-v1';
   function clearCaches() {
     if (!('caches' in window) || !window.caches.keys) {
       toast('当前浏览器不支持清理网页缓存');
       return Promise.resolve(0);
     }
     return window.caches.keys().then(function (keys) {
-      return Promise.all(keys.map(function (k) { return window.caches.delete(k); })).then(function () { return keys.length; });
+      var deletable = keys.filter(function (k) { return k !== STARWAVE_PWA_CACHE_NAME; });
+      return Promise.all(deletable.map(function (k) { return window.caches.delete(k); })).then(function () { return deletable.length; });
     }).then(function (n) {
       toast(n ? ('已清理 ' + n + ' 个网页缓存') : '没有可清理的网页缓存');
       refreshStorage();

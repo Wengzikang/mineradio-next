@@ -35,3 +35,10 @@ Copyright (C) 2026 XxHuberrr。Mineradio 名称、MR Logo、界面视觉设计�
 2026-11-09，StarWave Phase 1：改名换标；删除桌面专属文件与全部浏览器扩展代码
 （含硬编码平台密钥，已清除）；删除油猴脚本；去掉 Google Fonts 外链（改用系统字体）；
 PWA 缓存名改为 `starwave-pwa-v1`；新增网易云公开 API 直连接入与 6 首公有领域/CC 演示曲目。
+
+2026-11-10，StarWave Phase 5A：搜索分页（P6，starwave-netease.js + index.html：
+fetchNeteaseWebSearchResults 支持 offset、[data-search-load-more] 逐页追加）；
+6 个新视觉预设（P1，starwave-phase5.js：声波丘陵、霓光涟漪、曜环、霓雨、光蝶、
+潮汐荧光，全部免费）；小工具（P9，starwave-phase5.js：存储统计与 Cache Storage
+清理、性能探针）；Phase 5A review fixes：取页失败保留“加载更多”供重试、新搜索/
+切换模式丢弃旧分页状态、清理缓存排除离线外壳缓存 starwave-pwa-v1。
