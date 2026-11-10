@@ -657,16 +657,20 @@
   ];
   var PARTICLE_BASE = { stardust: 140, rain: 220, snow: 160, firefly: 70 };
   var SHOTS = [
-    { id: 'intro', label: '前奏', from: 0, to: 0.12, transform: 'scale(1.02) translateY(0px)' },
-    { id: 'verse', label: '主歌', from: 0.12, to: 0.45, transform: 'scale(1.0) translateX(-6px)' },
-    { id: 'chorus', label: '副歌', from: 0.45, to: 0.78, transform: 'scale(1.08) translateY(-8px)' },
-    { id: 'bridge', label: '间奏', from: 0.78, to: 0.88, transform: 'scale(1.04) translateX(6px)' },
-    { id: 'outro', label: '尾奏', from: 0.88, to: 1.01, transform: 'scale(1.0) translateY(4px)' }
+    { id: 'intro', label: '前奏', from: 0, to: 0.12, transform: 'scale(1.02) translateY(0px)', zoom: 1.02, tx: 0, ty: 0 },
+    { id: 'verse', label: '主歌', from: 0.12, to: 0.45, transform: 'scale(1.0) translateX(-6px)', zoom: 1.0, tx: -6, ty: 0 },
+    { id: 'chorus', label: '副歌', from: 0.45, to: 0.78, transform: 'scale(1.08) translateY(-8px)', zoom: 1.08, tx: 0, ty: -8 },
+    { id: 'bridge', label: '间奏', from: 0.78, to: 0.88, transform: 'scale(1.04) translateX(6px)', zoom: 1.04, tx: 6, ty: 0 },
+    { id: 'outro', label: '尾奏', from: 0.88, to: 1.01, transform: 'scale(1.0) translateY(4px)', zoom: 1.0, tx: 0, ty: 4 }
   ];
   var particle = {
     canvas: null, ctx: null, bg: null, parts: [], type: 'stardust',
     running: false, raf: 0, lastT: 0, fpsEma: 60, budget: 1, kick: 0, spectrum: { low: 0, mid: 0, high: 0 },
-    sceneId: 'starry', shotId: '', shotLabel: '', frame: 0
+    sceneId: 'starry', shotId: '', shotLabel: '', frame: 0,
+    /* 镜头缩放/平移的当前值与目标值：逐帧在画布内变换中缓动（见 particleTick），
+       替代原来对 canvas 元素的 CSS transform 缩放，避免对已栅格化位图的二次采样放大导致发糊。
+       shotCss 只保留给背景层与陀螺仪处理沿用原来的 transform 字符串。 */
+    zoom: 1, tx: 0, ty: 0, zoomT: 1, txT: 0, tyT: 0, shotCss: ''
   };
   function sceneById(id) {
     for (var i = 0; i < SCENES.length; i++) if (SCENES[i].id === id) return SCENES[i];
@@ -682,7 +686,9 @@
       particle.bg = bg;
       var cv = document.createElement('canvas');
       cv.id = 'sw4b-particles';
-      cv.style.cssText = 'position:fixed;inset:0;z-index:2;pointer-events:none;transition:transform 1.2s ease;';
+      /* 画布本身不再用 CSS transform 做镜头缩放（会把已栅格化的位图二次采样放大、发糊），
+         镜头缩放/平移改在 particleTick 的 2D 变换里做；背景层仍保留 transform 过渡。 */
+      cv.style.cssText = 'position:fixed;inset:0;z-index:2;pointer-events:none;';
       document.body.appendChild(cv);
       particle.canvas = cv;
       particle.ctx = cv.getContext('2d');
@@ -694,7 +700,9 @@
   function resizeParticles() {
     try {
       if (!particle.canvas) return;
-      var dpr = Math.min(window.devicePixelRatio || 1, 2);
+      /* 后备分辨率按 min(dpr, 3)：iPhone 的 dpr 为 3，旧上限 2 会让画布先被合成器放大 1.5 倍再显示，
+         是发糊的另一来源；桌面 dpr ≤ 2 不受影响。 */
+      var dpr = Math.min(window.devicePixelRatio || 1, 3);
       particle.canvas.width = Math.floor(window.innerWidth * dpr);
       particle.canvas.height = Math.floor(window.innerHeight * dpr);
       particle.canvas.style.width = window.innerWidth + 'px';
@@ -768,8 +776,11 @@
     if (shot.id !== particle.shotId) {
       particle.shotId = shot.id;
       particle.shotLabel = shot.label;
+      /* 镜头目标改为数值：画布在 particleTick 里用 2D 变换逐帧重栅格化（清晰）；
+         背景层仍用原来的 CSS transform 字符串（平滑渐变，缩放不显糊）。 */
+      particle.zoomT = shot.zoom || 1; particle.txT = shot.tx || 0; particle.tyT = shot.ty || 0;
+      particle.shotCss = shot.transform || '';
       try {
-        if (particle.canvas) particle.canvas.style.transform = shot.transform;
         if (particle.bg) particle.bg.style.transform = shot.transform;
       } catch (e) { /* ignore */ }
       var el = $('sw4b-shot-label');
@@ -802,7 +813,18 @@
     var ctx = particle.ctx;
     if (!ctx) return;
     var w = window.innerWidth, h = window.innerHeight;
-    ctx.clearRect(0, 0, w, h);
+    /* 镜头缩放/平移在画布内变换中完成：每帧按当前缩放重栅格化粒子，边缘清晰；
+       旧做法是对 canvas 元素做 CSS scale(1.02–1.08)，等于把已栅格化的位图再放大采样，是发糊的主因。
+       缓动半衰期约 400ms，1.2s 时完成约 87.5%、约 2s 基本到位，保留原来 transition:transform 1.2s ease 的镜头手感。 */
+    var easeK = 1 - Math.pow(0.5, dt / 400);
+    particle.zoom += (particle.zoomT - particle.zoom) * easeK;
+    particle.tx += (particle.txT - particle.tx) * easeK;
+    particle.ty += (particle.tyT - particle.ty) * easeK;
+    var dpr = Math.min(window.devicePixelRatio || 1, 3);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, particle.canvas.width, particle.canvas.height);
+    var cx = w / 2, cy = h / 2, z = particle.zoom;
+    ctx.setTransform(dpr * z, 0, 0, dpr * z, dpr * ((1 - z) * cx + particle.tx), dpr * ((1 - z) * cy + particle.ty));
     var kick = particle.kick, spec = particle.spectrum;
     var speedMul = 1 + kick * 1.6 + spec.low * 0.8;
     for (var i = 0; i < particle.parts.length; i++) {
@@ -842,7 +864,7 @@
   function stopParticles() {
     particle.running = false;
     try { cancelAnimationFrame(particle.raf); } catch (e) { /* ignore */ }
-    try { if (particle.ctx) particle.ctx.clearRect(0, 0, window.innerWidth, window.innerHeight); } catch (e) { /* ignore */ }
+    try { if (particle.ctx && particle.canvas) { particle.ctx.setTransform(1, 0, 0, 1, 0, 0); particle.ctx.clearRect(0, 0, particle.canvas.width, particle.canvas.height); } } catch (e) { /* ignore */ }
   }
   function setParticleType(type, silent) {
     if (!PARTICLE_BASE[type]) return false;
@@ -1130,7 +1152,7 @@
     try {
       var gamma = clamp(Number(e.gamma) || 0, -30, 30);
       var beta = clamp(Number(e.beta) || 0, -30, 30);
-      if (particle.bg) particle.bg.style.transform = 'translate(' + (gamma * 0.3).toFixed(1) + 'px,' + (beta * 0.2).toFixed(1) + 'px) ' + (particle.canvas ? particle.canvas.style.transform || '' : '');
+      if (particle.bg) particle.bg.style.transform = 'translate(' + (gamma * 0.3).toFixed(1) + 'px,' + (beta * 0.2).toFixed(1) + 'px) ' + (particle.shotCss || '');
     } catch (err) { /* ignore */ }
   }
   function setShakeEnabled(on) {
