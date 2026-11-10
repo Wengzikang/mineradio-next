@@ -493,6 +493,21 @@ def main():
     console_real = _kept
     first_party_failed = [u for u in report['failed_requests'] if u.startswith(BASE_URL)]
     report['third_party_failed_requests'] = [u for u in report['failed_requests'] if not u.startswith(BASE_URL)]
+    # Carve-out (b) also applies to the console side: a failed third-party
+    # resource (e.g. Audius cover image) logs one "Failed to load resource"
+    # console error, and console errors carry no URL. Attribute by count:
+    # drop up to (third-party failed requests minus the deliberate abort,
+    # already excluded above) such errors. This cannot mask a first-party
+    # failure: first-party failures still fail errors.failed_requests_zero
+    # independently of the console budget.
+    _tp_left = len(report['third_party_failed_requests']) - aborted_for_test
+    _kept2 = []
+    for e in console_real:
+        if _tp_left > 0 and e.strip().startswith('Failed to load resource: net::'):
+            _tp_left -= 1
+            continue
+        _kept2.append(e)
+    console_real = _kept2
     if not check('errors.console_zero', len(console_real) == 0, console_real[:5]):
         failures += 1
     if not check('errors.page_zero', len(report['page_errors']) == 0, report['page_errors'][:5]):
