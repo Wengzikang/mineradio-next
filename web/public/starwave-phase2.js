@@ -42,7 +42,13 @@
     '#bottom-bar{padding-bottom:env(safe-area-inset-bottom,0px)}',
     '#empty-home{bottom:calc(58px + env(safe-area-inset-bottom,0px))}',
     '#top-right{padding-top:env(safe-area-inset-top,0px)}',
-    '@media (max-width:720px){body.simple-mode #search-area.peek{top:calc(24px + env(safe-area-inset-top,0px))}}',
+    /* 2026-11-10 窄屏顶部重叠修复：按钮组与搜索框上下分两行（按钮组 top:12px，
+     * 搜索框 top:68px = 12 + 44 按钮高 + 12 间距，再加安全区偏移）。
+     * 本注入样式后于主样式表加载，同等选择器下以这里为准；主样式表 index.html
+     * 里的 68px/62px 只是注入失效时的兜底。窄屏同时隐藏“设置与关于”入口（见主样式表）。 */
+    '@media (max-width:720px){#top-right,body.desktop-shell #top-right,body.desktop-shell.desktop-fullscreen #top-right{top:12px;right:12px;gap:8px;max-width:calc(100vw - 24px)}}',
+    '@media (max-width:720px){body.simple-mode #search-area.peek,body.desktop-shell #search-area.peek,body.desktop-shell.simple-mode #search-area.peek{top:calc(68px + env(safe-area-inset-top,0px))}}',
+    '@media (max-width:720px){#search-area.stage-mode.peek{top:calc(62px + env(safe-area-inset-top,0px))}}',
     /* 关于/设置弹窗与电台角标 */
     '#starwave-about-modal .modal{width:min(640px,94vw);max-height:min(780px,calc(100dvh - 64px));overflow:auto;text-align:left}',
     '.sw-about h3{font-size:13px;margin:18px 0 8px;color:rgba(255,255,255,.85)}',
