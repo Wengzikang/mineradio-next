@@ -528,11 +528,13 @@ def main():
                         switch_ok = True
                         break
             # Round-2 fix (Minor 2): the post-switch cache must hold no
-            # old-token items (snapshot items now carry token).
-            old_token_gone = True
+            # old-token items (snapshot items now carry token). Non-empty is
+            # required: all() over zero items would pass vacuously (L1).
+            old_token_gone = False
             if snap_post_switch:
-                old_token_gone = all(i.get('token') == snap_post_switch.get('trackToken')
-                                     for i in snap_post_switch.get('items', []))
+                old_token_gone = (len(snap_post_switch.get('items', [])) >= 1
+                                  and all(i.get('token') == snap_post_switch.get('trackToken')
+                                          for i in snap_post_switch.get('items', [])))
             switch_ok = switch_ok and old_token_gone
             if not check('p3b.track_switch_prewarm', bool(switched and switch_ok),
                          {'switched': switched, 'attempts': switch_attempts,
@@ -554,8 +556,10 @@ def main():
                 " sizeBefore: b.cacheSize, sizeAfter: a.cacheSize,"
                 " keysBefore: b.items.map(i => i.key), keysAfter: a.items.map(i => i.key),"
                 " buildsBefore: b.stats.builds, buildsAfter: a.stats.builds }; }")
-            dedup_ok = (dedup['wrapped'] and dedup['sizeAfter'] == dedup['sizeBefore']
-                        and dedup['keysAfter'] == dedup['keysBefore'])
+            dedup_ok = (dedup['wrapped'] and dedup['sizeBefore'] >= 1
+                        and dedup['sizeAfter'] == dedup['sizeBefore']
+                        and dedup['keysAfter'] == dedup['keysBefore']
+                        and dedup['buildsAfter'] == dedup['buildsBefore'])
             if not check('p3b.same_lyrics_reapply_no_rebuild', dedup_ok, dedup):
                 failures += 1
 
@@ -582,14 +586,20 @@ def main():
                 eco_ok = bool(snap_eco and snap_eco['enabled'] is False and snap_eco['cap'] == 0
                               and snap_eco['cacheSize'] == 0 and refused is False
                               and (snap_eco2 or {}).get('stats', {}).get('builds', 0) == builds_eco0)
-                # restore the original tier + auto governor mode
+                # restore the original tier + auto governor mode. NOTE: in
+                # auto mode the tier is re-derived from live fps, so it need
+                # not read back as orig_tier in headless (fps ~2-3); assert
+                # the mode is back to auto and record the tier instead.
                 page.evaluate("(t) => setPerformanceQualityMode(t, true)", orig_tier)
                 page.evaluate("() => { if (window.starwavePerfGovernor) window.starwavePerfGovernor.setMode('auto'); }")
                 page.wait_for_timeout(1000)
                 restored = page.evaluate(
                     "() => (window.starwavePerfGovernor ? window.starwavePerfGovernor.tier : null)")
+                restored_mode = page.evaluate(
+                    "() => (window.starwavePerfGovernor ? window.starwavePerfGovernor.mode : null)")
                 eco_detail['restoredTier'] = restored
-                eco_ok = eco_ok and (restored == orig_tier)
+                eco_detail['restoredMode'] = restored_mode
+                eco_ok = eco_ok and (restored_mode == 'auto')
             if not check('p3b.low_end_guard', eco_ok, eco_detail):
                 failures += 1
 
