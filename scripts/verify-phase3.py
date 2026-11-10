@@ -2,12 +2,14 @@
 """StarWave Phase 3 verification (real browser, real network).
 Serves web/public via python http.server on 127.0.0.1:4173 and drives it with Playwright.
 Covers task items 1-8 + regression:
-  1 playback chain: demo / local file / netease free / iTunes 30s / radio
-  2 queue: add/move/remove/clear/modes/next-prev/resume-after-reload, panel render
-  3 lyrics sync: line highlight vs currentTime (demo LRC), +/-0.5s offset step
-  4 spectrum: dual Analyser real data (demo/local) + BPM/Kick; synthetic labelled for x-origin
+  1 playback chain: local file (generated mp3 fixture) / netease free / iTunes 30s / radio
+  2 queue: add/move/remove/clear/modes/next-prev, panel render
+     (resume-after-reload + lyrics sync skipped: their fixtures were the demo songs,
+      deleted 2026-11-10 at Ma's order; the code paths themselves are untouched)
+  3 lyrics sync: SKIPPED (demo LRC fixture deleted with the demo songs)
+  4 spectrum: dual Analyser real data (local file) + BPM/Kick; synthetic labelled for x-origin
   5 audio FX: volume, 3-band EQ (white-noise file, low band +12 vs -12)
-  6 favorites: demo/local/netease-free favorite/unfavorite/list (no login gate)
+  6 favorites: local/netease-free favorite/unfavorite/list (no login gate)
   7 history: record (seek 55% + switch), view, clear
   8 playlists: local CRUD, detail page lists tracks; netease public import -> honest reason
   9 regression: build:web, spotify/apple globals, cookie login still disabled
@@ -128,17 +130,21 @@ def dismiss_splash(page):
     page.wait_for_timeout(1200)
 
 
-def play_demos(page):
-    """Put the 6 demo songs in the queue and play idx 0. Returns queue state."""
-    page.evaluate(
-        """async () => {
-          const songs = await window.starwavePhase3.demoSongs();
-          window.playQueue = songs;
-          window.currentIdx = 0;
-          await playQueueAt(0, { manual: true });
-          return songs.length;
-        }""")
+def play_fixture(page):
+    """Import the generated MP3 fixture as a local file and play it (blob path:
+    the same real-analyser chain the deleted demo songs used to exercise).
+    The local-file import plays directly (currentLocalSong), not via playQueue.
+    Playing a local file with no cached beat map opens the local-beat
+    analysis modal, so close it (it would block later pointer actions).
+    Returns queue state."""
+    page.set_input_files('#file-input', LOCAL_MP3)
     page.wait_for_timeout(4000)
+    page.evaluate("() => { try { if (typeof closeLocalBeatModal === 'function') closeLocalBeatModal(); } catch (e) {} }")
+    page.wait_for_timeout(500)
+    modal_open = page.evaluate("() => { const m = document.getElementById('local-beat-modal'); return !!(m && m.classList.contains('show')); }")
+    if modal_open:
+        page.keyboard.press('Escape')
+        page.wait_for_timeout(500)
     return page.evaluate("() => window.starwavePhase3.queueState()")
 
 
@@ -163,7 +169,6 @@ def prepare_test_files():
     """(Re)generate deterministic test audio in /tmp (lost on VM restart)."""
     import math
     import random
-    import shutil
     import struct
     import wave
     sr = 44100
@@ -187,8 +192,15 @@ def prepare_test_files():
         v = math.sin(2 * math.pi * 55 * t) * env * 0.9
         frames += struct.pack('<h', int(max(-1, min(1, v)) * 30000))
     w.writeframes(bytes(frames)); w.close()
-    # a renamed demo copy, treated as a plain local file on import
-    shutil.copyfile(os.path.join(ROOT, 'web', 'public', 'demo', 'sakura.mp3'), LOCAL_MP3)
+    # local mp3 fixture: 30 s white noise (broad spectrum, deterministic).
+    # The demo songs (incl. sakura.mp3) were deleted 2026-11-10 at Ma's order;
+    # the mp3 import test now uses this ffmpeg-generated file instead.
+    r = subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
+                        '-f', 'lavfi', '-i', 'anoisesrc=color=white:duration=30',
+                        '-codec:a', 'libmp3lame', '-q:a', '4', LOCAL_MP3],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError('ffmpeg failed to generate LOCAL_MP3: ' + (r.stderr or ''))
 
 
 def main():
@@ -220,11 +232,11 @@ def main():
         page.evaluate("() => window.starwavePhase3.clearHistory()")
         page.wait_for_timeout(500)
 
-        print('== (1a) demo play + spectrum')
-        qs = play_demos(page)
+        print('== (1a) fixture play + spectrum (local mp3)')
+        qs = play_fixture(page)
         st = audio_state(page)
-        print('demo queue:', json.dumps(qs, ensure_ascii=False), 'audio:', json.dumps(st, ensure_ascii=False))
-        report['demo_play'] = {'queue': qs, 'audio': st}
+        print('fixture queue:', json.dumps(qs, ensure_ascii=False), 'audio:', json.dumps(st, ensure_ascii=False))
+        report['fixture_play'] = {'queue': qs, 'audio': st}
         s1 = page.evaluate("() => window.starwavePhase3.spectrumSample()")
         page.wait_for_timeout(1500)
         s2 = page.evaluate("() => window.starwavePhase3.spectrumSample()")
@@ -232,44 +244,16 @@ def main():
         print('spectrum1:', json.dumps({k: s1[k] for k in ('mode', 'max', 'mean', 'low', 'mid', 'high')}, ensure_ascii=False))
         print('spectrum2:', json.dumps({k: s2[k] for k in ('mode', 'max', 'mean', 'low', 'mid', 'high')}, ensure_ascii=False))
         print('beat:', json.dumps(beat, ensure_ascii=False))
-        report['spectrum_demo'] = {'s1': s1, 's2': s2, 'beat': beat,
+        report['spectrum_fixture'] = {'s1': s1, 's2': s2, 'beat': beat,
                                    'changed': s1.get('bins') != s2.get('bins')}
         # let kick onsets accumulate a bit longer for BPM
         page.wait_for_timeout(6000)
         beat2 = page.evaluate("() => window.starwavePhase3.beatInfo()")
         print('beat after +6s:', json.dumps(beat2, ensure_ascii=False))
-        report['spectrum_demo']['beat_late'] = beat2
+        report['spectrum_fixture']['beat_late'] = beat2
 
-        print('== (3) lyrics sync (sakura LRC)')
-        page.evaluate("() => { if (typeof toggleLyricsPanel === 'function') toggleLyricsPanel(true); }")
-        try:
-            page.wait_for_function("() => (window.lyricsLines || []).length >= 10", timeout=15000)
-        except Exception as e:
-            print('lyrics wait fail:', e)
-        print('lyric lines:', page.evaluate("() => ({ n: (window.lyricsLines||[]).length, src: window.lyricsTimingSource })"))
-        lyric_checks = []
-        for seek_t in (20, 40):
-            page.evaluate("() => { const a = window.audio; a.currentTime = %s; }" % seek_t)
-            page.wait_for_timeout(3000)
-            ls = page.evaluate("() => window.starwavePhase3.lyricState()")
-            exp_idx, total = lrc_expected(os.path.join(ROOT, 'web', 'public', 'demo', 'sakura.lrc'), seek_t)
-            print('seek', seek_t, 'lyricState:', json.dumps(ls, ensure_ascii=False), 'expected_idx:', exp_idx)
-            lyric_checks.append({'seek': seek_t, 'state': ls, 'expected_idx': exp_idx, 'total': total})
-        # offset step: pause just before line 2 (33.23s); +0.5s must move expected line 1 -> 2
-        page.evaluate("() => { const a = window.audio; a.pause(); a.currentTime = 33.0; }")
-        page.wait_for_timeout(800)
-        ls0 = page.evaluate("() => window.starwavePhase3.lyricState()")
-        off = page.evaluate("() => window.starwavePhase3.setLyricOffsetMs(500)")
-        ls1 = page.evaluate("() => window.starwavePhase3.lyricState()")
-        page.evaluate("() => { const a = window.audio; a.play(); }")
-        page.wait_for_timeout(2500)
-        ls1_live = page.evaluate("() => window.starwavePhase3.lyricState()")
-        off_back = page.evaluate("() => window.starwavePhase3.setLyricOffsetMs(0)")
-        print('offset paused@33.0:', json.dumps(ls0, ensure_ascii=False), '-> +500ms:', off, json.dumps(ls1, ensure_ascii=False),
-              'live after resume:', json.dumps(ls1_live, ensure_ascii=False), 'back:', off_back)
-        report['lyrics'] = {'checks': lyric_checks,
-                            'offset_test': {'paused_at33_offset0': ls0, 'set_ms': off, 'paused_at33_offset500': ls1,
-                                            'live_after_resume': ls1_live, 'reset_ms': off_back}}
+        print('== (3) lyrics sync SKIPPED: demo LRC fixture deleted with the demo songs (2026-11-10); lyric code untouched')
+        report['lyrics'] = {'skipped': 'demo LRC fixture removed with demo songs; needs a new fixture to re-cover'}
 
         print('== (5) volume + EQ (white noise local file for deterministic bands)')
         vol = page.evaluate("() => window.starwavePhase3.setVolume(0.5)")
@@ -346,7 +330,7 @@ def main():
         print('kick90:', json.dumps(kick, ensure_ascii=False))
         report['bpm_kick90'] = kick
 
-        print('== (1b) local mp3 import (sakura copy)')
+        print('== (1b) local mp3 import (generated fixture)')
         page.set_input_files('#file-input', LOCAL_MP3)
         page.wait_for_timeout(4000)
         mp3 = {'audio': audio_state(page),
@@ -521,14 +505,27 @@ def main():
         page.evaluate("() => window.starwaveRadio.stop()")
 
         print('== (2) queue ops')
-        play_demos(page)
+        play_fixture(page)
         q0 = page.evaluate("() => window.starwavePhase3.queueState()")
         add1 = page.evaluate(
             """async () => {
-              const songs = await window.starwavePhase3.demoSongs();
-              return { added_idx: window.starwavePhase3.addToQueue(songs[3]),
-                       added_next_idx: window.starwavePhase3.addToQueue(songs[4], 'next'),
-                       state: window.starwavePhase3.queueState() };
+              const local = window.currentLocalSong || (window.playQueue && window.playQueue[0]) || null;
+              let free = [];
+              for (const q of ['周杰伦', '邓丽君']) {
+                try {
+                  const songs = await fetchNeteaseWebSearchResults(q);
+                  free = free.concat(songs.filter(s => s.fee === 0).slice(0, 2));
+                } catch (e) { /* ignore */ }
+                if (free.length >= 2) break;
+              }
+              const pool = [];
+              if (local) pool.push(local);
+              free.forEach(s => pool.push(s));
+              const out = { pool_n: pool.length };
+              if (pool[0]) out.added_idx = window.starwavePhase3.addToQueue(pool[0]);
+              if (pool[1]) out.added_next_idx = window.starwavePhase3.addToQueue(pool[1], 'next');
+              out.state = window.starwavePhase3.queueState();
+              return out;
             }""")
         print('after adds:', json.dumps(add1, ensure_ascii=False))
         mv = page.evaluate(
@@ -583,68 +580,54 @@ def main():
                            'panel': panel, 'after_clear': clr}
         page.evaluate("() => { if (typeof togglePlaylistPanel === 'function') togglePlaylistPanel(false); }")
 
-        print('== (2b) resume after reload')
-        play_demos(page)
-        page.evaluate("() => { const a = window.audio; a.currentTime = 30; }")
-        page.wait_for_timeout(6500)
-        rs_before = page.evaluate("() => window.starwavePhase3.resumeState()")
-        print('resume saved:', json.dumps(rs_before, ensure_ascii=False))
-        page.reload(wait_until='load', timeout=60000)
-        dismiss_splash(page)
-        page.wait_for_timeout(1500)
-        restored = page.evaluate("() => window.starwavePhase3.restoreResume()")
-        page.wait_for_timeout(4000)
-        rs_after = {'restore': restored, 'audio': audio_state(page),
-                    'queue': page.evaluate("() => window.starwavePhase3.queueState()"),
-                    'resume_state': page.evaluate("() => window.starwavePhase3.resumeState()")}
-        print('resume after reload:', json.dumps(rs_after, ensure_ascii=False))
-        report['resume'] = {'before_reload': rs_before, 'after_reload': rs_after}
-        page.evaluate("() => { try { if (window.audio) window.audio.pause(); } catch(e){} }")
+        print('== (2b) resume after reload SKIPPED: restorable same-origin fixture was the demo songs (deleted 2026-11-10); blob local tracks are excluded from resume by design; resume code untouched')
+        report['resume'] = {'skipped': 'demo-song fixture removed; resume logic unchanged'}
 
         print('== (6) favorites (no login gate)')
+        # Re-import the fixture: section (2) ends with clearQueue(), so no
+        # current song is left (the old flow fetched fresh demo songs here).
+        play_fixture(page)
         fav = page.evaluate(
             """async () => {
-              const demos = await window.starwavePhase3.demoSongs();
-              const r1 = window.starwavePhase3.toggleFavorite(demos[0]);
-              const r2 = window.starwavePhase3.toggleFavorite(demos[1]);
-              const out = { demo_fav: r1, demo2_fav: r2, is_fav0: window.starwavePhase3.isFavorite(demos[0]) };
-              // (2b) reloaded the page, so re-find a free netease song here
+              const local = window.currentLocalSong || (window.playQueue && window.playQueue[0]) || null;
+              const r1 = local ? window.starwavePhase3.toggleFavorite(local) : null;
               let free = null;
               for (const q of ['周杰伦', '邓丽君', '刘德华', '陈奕迅']) {
                 const songs = await fetchNeteaseWebSearchResults(q);
                 free = songs.find(s => s.fee === 0);
                 if (free) break;
               }
-              if (free) out.netease_free_fav = window.starwavePhase3.toggleFavorite(free);
+              const r2 = free ? window.starwavePhase3.toggleFavorite(free) : null;
+              const out = { local_fav: r1, netease_free_fav: r2, is_fav_local: local ? window.starwavePhase3.isFavorite(local) : null };
               out.list_len = window.starwavePhase3.listFavorites().length;
               out.list = window.starwavePhase3.listFavorites().map(f => f.song.name + '|' + (f.song.provider||''));
               return out;
             }""")
         print('favorites:', json.dumps(fav, ensure_ascii=False))
-        # old bug: openCollectModal on a demo song must open local collect UI, not reject
+        # old bug: openCollectModal on a non-login song must open local collect UI, not reject
         page.evaluate(
-            """async () => {
-              const demos = await window.starwavePhase3.demoSongs();
-              openCollectModal(demos[0]);
+            """() => {
+              const local = window.currentLocalSong || (window.playQueue && window.playQueue[0]) || null;
+              if (local) openCollectModal(local);
             }""")
         page.wait_for_timeout(1200)
         collect_ui = page.evaluate(
             "() => ({ modal_shown: !!document.querySelector('#starwave-phase3-modal.show'),"
             " body_has_collect: (document.getElementById('sw3-body')||{}).textContent ? document.getElementById('sw3-body').textContent.indexOf('正在收藏') >= 0 : false,"
             " toast: (document.getElementById('toast')||{}).textContent || '' })")
-        print('collect modal on demo:', json.dumps(collect_ui, ensure_ascii=False))
+        print('collect modal on local:', json.dumps(collect_ui, ensure_ascii=False))
         page.evaluate("() => window.starwavePhase3.closeLibraryModal()")
-        # old bug: toggleLikeSong on a demo song must favorite locally, not reject
+        # old bug: toggleLikeSong on a non-login song must favorite locally, not reject
         like = page.evaluate(
             """async () => {
               const before = window.starwavePhase3.listFavorites().length;
-              const demos = await window.starwavePhase3.demoSongs();
-              toggleLikeSong(demos[2]);
+              const local = window.currentLocalSong || (window.playQueue && window.playQueue[0]) || null;
+              if (local) toggleLikeSong(local);
               await new Promise(r => setTimeout(r, 300));
               return { before: before, after: window.starwavePhase3.listFavorites().length,
                        toast: (document.getElementById('toast')||{}).textContent || '' };
             }""")
-        print('toggleLike on demo:', json.dumps(like, ensure_ascii=False))
+        print('toggleLike on local:', json.dumps(like, ensure_ascii=False))
         # modal favorites tab renders rows
         page.evaluate("() => window.starwavePhase3.openLibraryModal('favorites')")
         page.wait_for_timeout(1000)
@@ -653,9 +636,9 @@ def main():
         page.evaluate("() => window.starwavePhase3.closeLibraryModal()")
         # unfavorite one
         unfav = page.evaluate(
-            """async () => {
-              const demos = await window.starwavePhase3.demoSongs();
-              const r = window.starwavePhase3.toggleFavorite(demos[0]);
+            """() => {
+              const local = window.currentLocalSong || (window.playQueue && window.playQueue[0]) || null;
+              const r = local ? window.starwavePhase3.toggleFavorite(local) : null;
               return { unfav: r, list_len: window.starwavePhase3.listFavorites().length };
             }""")
         print('unfavorite:', json.dumps(unfav, ensure_ascii=False))
@@ -664,8 +647,19 @@ def main():
 
         print('== (7) history')
         page.evaluate("() => window.starwavePhase3.clearHistory()")
-        play_demos(page)
-        page.evaluate("() => { const a = window.audio; a.currentTime = (a.duration || 209) * 0.55; }")
+        play_fixture(page)
+        page.evaluate(
+            """() => {
+              const local = window.currentLocalSong || (window.playQueue && window.playQueue[0]) || null;
+              if (!local) return false;
+              const second = Object.assign({}, local, { id: (local.localKey || local.id || 'local') + '#2', name: (local.name || 'fixture') + ' (2)', localKey: (local.localKey || '') + '#2' });
+              window.playQueue = [local, second];
+              window.currentIdx = 0;
+              return true;
+            }""")
+        page.evaluate("() => { if (typeof playQueueAt === 'function') playQueueAt(0, { manual: true }); }")
+        page.wait_for_timeout(3000)
+        page.evaluate("() => { const a = window.audio; a.currentTime = (a.duration || 30) * 0.55; }")
         page.wait_for_timeout(3000)
         page.evaluate("() => { if (typeof nextTrack === 'function') nextTrack(); }")
         page.wait_for_timeout(5000)
@@ -673,8 +667,8 @@ def main():
         print('history after 55% + switch:', json.dumps(hs, ensure_ascii=False))
         # Phase 3 fix check: the switch must NOT record the incoming song with
         # ~0ms (old bug: old track's 55% progress was credited to the new song)
-        hs_phantom = [e for e in hs['entries'] if e['name'] == '茉莉花']
-        print('history phantom check: names=%s phantom_moli=%s'
+        hs_phantom = [e for e in hs['entries'] if e['name'] and e['name'].endswith(' (2)')]
+        print('history phantom check: names=%s phantom_second=%s'
               % ([e['name'] for e in hs['entries']], hs_phantom))
         page.evaluate("() => window.starwavePhase3.openLibraryModal('history')")
         page.wait_for_timeout(1000)
@@ -684,12 +678,12 @@ def main():
         hs_cleared = page.evaluate("() => window.starwavePhase3.clearHistory()")
         print('history after clear:', json.dumps(hs_cleared, ensure_ascii=False))
         report['history'] = {'after_listen': hs, 'modal_rows': hs_rows, 'after_clear': hs_cleared,
-                             'phantom_moli': hs_phantom}
+                             'phantom_second': hs_phantom}
 
         print('== (8) local playlists + netease import honesty')
         pl = page.evaluate(
             """async () => {
-              const demos = await window.starwavePhase3.demoSongs();
+              const local = window.currentLocalSong || (window.playQueue && window.playQueue[0]) || null;
               let free = null;
               for (const q of ['周杰伦', '邓丽君', '刘德华', '陈奕迅']) {
                 const songs = await fetchNeteaseWebSearchResults(q);
@@ -697,10 +691,10 @@ def main():
                 if (free) break;
               }
               const created = window.starwavePhase3.createLocalPlaylist('Phase3测试歌单');
-              const a1 = window.starwavePhase3.addToLocalPlaylist(created.id, demos[0]);
-              const a2 = window.starwavePhase3.addToLocalPlaylist(created.id, demos[1]);
-              const a3 = free ? window.starwavePhase3.addToLocalPlaylist(created.id, free) : null;
-              const dup = window.starwavePhase3.addToLocalPlaylist(created.id, demos[0]);
+              const a1 = local ? window.starwavePhase3.addToLocalPlaylist(created.id, local) : null;
+              const a2 = free ? window.starwavePhase3.addToLocalPlaylist(created.id, free) : null;
+              const a3 = local ? window.starwavePhase3.addToLocalPlaylist(created.id, Object.assign({}, local, { id: (local.localKey || local.id || 'local') + '#pl', name: (local.name || 'fixture') + ' (歌单版)' })) : null;
+              const dup = local ? window.starwavePhase3.addToLocalPlaylist(created.id, local) : null;
               const renamed = window.starwavePhase3.renameLocalPlaylist(created.id, 'Phase3改名歌单');
               const list = window.starwavePhase3.listLocalPlaylists().map(p => ({ id: p.id, name: p.name, n: p.tracks.length }));
               return { created: { id: created.id, name: created.name }, adds: [a1, a2, a3], dup_rejected: !dup,
@@ -726,9 +720,10 @@ def main():
         # remove one song, then delete the playlist
         rm_song = page.evaluate(
             """async () => {
-              const demos = await window.starwavePhase3.demoSongs();
-              const key = (function(){ try { return queueItemKey(demos[1]); } catch(e){ return demos[1].name + '|' + demos[1].artist; } })();
-              const ok = window.starwavePhase3.removeFromLocalPlaylist('""" + pid + """', key);
+              const pl0 = window.starwavePhase3.listLocalPlaylists()[0];
+              const second = pl0 && pl0.tracks && pl0.tracks[1];
+              const key = second ? (function(){ try { return queueItemKey(second); } catch(e){ return second.name + '|' + second.artist; } })() : null;
+              const ok = key ? window.starwavePhase3.removeFromLocalPlaylist('""" + pid + """', key) : false;
               const after = window.starwavePhase3.listLocalPlaylists()[0];
               return { removed: ok, remaining: after ? after.tracks.length : -1 };
             }""")

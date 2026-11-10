@@ -356,8 +356,8 @@
     var line = slot.lines[day % slot.lines.length];
     return line.replace('{weather}', weather.label || '好天气').replace('{city}', weather.city || '这里').replace('{mood}', mood || '放松');
   }
-  /* 生成 DJ 歌单：天气电台 + 每日推荐 + 本地画像（常听歌手优先）+ 演示曲兜底。
-     登录后只用歌单里的歌（演示曲兜底不生效）。全程本地规则，不调用任何模型服务。 */
+  /* 生成 DJ 歌单：天气电台 + 每日推荐 + 本地画像（常听歌手优先）。
+     登录后只用歌单里的歌。全程本地规则，不调用任何模型服务。 */
   function generateDj(opts) {
     opts = opts || {};
     var now = new Date();
@@ -382,11 +382,7 @@
       }
       /* 天气电台优先，其次每日推荐 */
       take(pool, 12 - picked.length);
-      var p3 = P3();
-      var demoPromise = null;
-      function finish(demos) {
-        if (picked.length < 6 && demos && demos.length) take(demos, 12 - picked.length);
-        if (picked.length < 3 && demos && demos.length) take(demos, 12 - picked.length);
+      function finish() {
         picked = dedupeSongs(picked).slice(0, 12);
         var dj = {
           slot: slot.id, slotLabel: slot.label, mood: mood,
@@ -398,10 +394,8 @@
         state.lastDj = dj;
         return dj;
       }
-      try {
-        demoPromise = p3 ? p3.demoSongs() : (typeof buildStarwaveDemoSongs === 'function' ? buildStarwaveDemoSongs() : Promise.resolve([]));
-      } catch (e) { demoPromise = Promise.resolve([]); }
-      return Promise.resolve(demoPromise).then(finish).catch(function () { return finish([]); });
+      /* 演示曲目已于 2026-11-10 全部删除，无兜底；池子为空时 DJ 歌单即为空（调用方已有空态提示）。 */
+      return Promise.resolve().then(function () { return finish(); });
     }
     /* 登录后：DJ 池只用歌单里的歌。 */
     if (typeof starwaveNetEaseLoggedIn === 'function' && starwaveNetEaseLoggedIn() && typeof neteaseWebFetchMyPlaylistSongs === 'function') {
@@ -414,7 +408,7 @@
   }
   function playDj(dj) {
     dj = dj || state.lastDj;
-    if (!dj || !dj.songs || !dj.songs.length) { toast('DJ 歌单还是空的，先等天气电台加载完'); return false; }
+    if (!dj || !dj.songs || !dj.songs.length) { toast('DJ 歌单还是空的：登录网易云后用你的歌单生成，或先听几首歌再试'); return false; }
     try {
       playQueue = dj.songs.map(cloneSongOf);
       currentIdx = 0;
@@ -451,7 +445,7 @@
     } catch (e) { return Promise.resolve({ songs: [], reason: 'recommend_failed' }); }
   }
   function localTopSongs(limit) {
-    /* 本地画像：常听歌曲（按播放次数/时长）映射到可播池（演示/天气/每日推荐） */
+    /* 本地画像：常听歌曲（按播放次数/时长）映射到可播池（天气/每日推荐） */
     try {
       var stats = null;
       try { stats = (typeof listenStatsState !== 'undefined') ? listenStatsState : JSON.parse(storeGet('starwave-listen-stats-v1') || 'null'); } catch (e) { stats = null; }
@@ -475,28 +469,23 @@
     var platformP = neteaseRecommendSongs();
     var local = localTopSongs(8);
     var pool = djPoolSongs();
-    var p3 = P3();
-    var demoP = null;
-    try { demoP = p3 ? p3.demoSongs() : (typeof buildStarwaveDemoSongs === 'function' ? buildStarwaveDemoSongs() : Promise.resolve([])); } catch (e) { demoP = Promise.resolve([]); }
     /* 登录后：推荐首选歌单里的歌。 */
     var loggedIn = (typeof starwaveNetEaseLoggedIn === 'function' && starwaveNetEaseLoggedIn());
     var myP = (loggedIn && typeof neteaseWebFetchMyPlaylistSongs === 'function')
       ? neteaseWebFetchMyPlaylistSongs(40).catch(function () { return []; })
       : Promise.resolve([]);
-    return Promise.all([platformP, Promise.resolve(demoP), myP]).then(function (res) {
+    return Promise.all([platformP, myP]).then(function (res) {
       var platform = res[0] || { songs: [], reason: 'recommend_failed' };
-      var demos = res[1] || [];
-      var mySongs = res[2] || [];
+      var mySongs = res[1] || [];
       var coldStart = local.length === 0 && platform.songs.length === 0 && mySongs.length === 0;
       var merged = [];
-      /* 跨平台去重与可播性排序：可播（有地址/演示/试听）优先，其次平台推荐，其次本地画像 */
-      var playable = function (s) { return !!(s.publicAudioUrl || s.previewUrl || s.provider === 'demo' || s.trial); };
+      /* 跨平台去重与可播性排序：可播（有地址/试听）优先，其次平台推荐，其次本地画像 */
+      var playable = function (s) { return !!(s.publicAudioUrl || s.previewUrl || s.trial); };
       var buckets = [
         mySongs,
         pool.filter(playable),
         platform.songs,
-        local,
-        demos
+        local
       ];
       buckets.forEach(function (list) { (list || []).forEach(function (s) { if (merged.indexOf(s) < 0) merged.push(s); }); });
       merged = dedupeSongs(merged);
@@ -1334,7 +1323,7 @@
     var slot = djTimeSlot();
     var weather = djWeatherInfo();
     body.innerHTML = '<h3>规则 AI DJ</h3>' +
-      '<p class="sw4b-note">按时间 / 天气 / 心情 / 本地画像拼歌单，用天气电台 + 每日推荐 + 演示曲的现成积木。串词为本地模板生成，<b>规则生成，非大模型</b>；不接任何模型服务、不产生费用。</p>' +
+      '<p class="sw4b-note">按时间 / 天气 / 心情 / 本地画像拼歌单，用天气电台 + 每日推荐的现成积木。串词为本地模板生成，<b>规则生成，非大模型</b>；不接任何模型服务、不产生费用。</p>' +
       '<p>当前时段：' + slot.label + ' · 天气：' + esc(weather.label || '未知') + ' ' + esc(weather.city || '') + ' · 常听歌手：' + esc(djTopArtists(3).join('、') || '暂无（冷启动）') + '</p>' +
       '<label>心情 <select id="sw4b-dj-mood">' +
       '<option value="auto">自动（按天气/时段）</option>' +
@@ -1342,13 +1331,13 @@
       '</select></label> ' +
       '<button class="primary" id="sw4b-dj-gen">生成今日 DJ 歌单</button> ' +
       '<button id="sw4b-dj-play">▶ 开始播放</button>' +
-      '<div id="sw4b-dj-out">' + (dj ? '<p>🎙 ' + esc(dj.line) + ' <span class="sw4b-note">（' + esc(dj.generatedBy) + ' · ' + esc(dj.slotLabel) + ' · ' + esc(dj.mood) + '）</span></p>' + songRows(dj.songs) : '<p class="sw4b-note">还没有 DJ 歌单，点“生成”试试。</p>') + '</div>';
+      '<div id="sw4b-dj-out">' + (dj ? ('<p>🎙 ' + esc(dj.line) + ' <span class="sw4b-note">（' + esc(dj.generatedBy) + ' · ' + esc(dj.slotLabel) + ' · ' + esc(dj.mood) + '）</span></p>' + ((dj.songs && dj.songs.length) ? songRows(dj.songs) : '<p class="sw4b-note">DJ 歌单是空的：登录网易云后用你的歌单生成，或先听几首歌再试。</p>')) : '<p class="sw4b-note">还没有 DJ 歌单，点“生成”试试。</p>') + '</div>';
     var moodSel = $('sw4b-dj-mood');
     if (moodSel) moodSel.addEventListener('change', function () { settings.djMood = moodSel.value; saveSettings(); });
     $('sw4b-dj-gen').addEventListener('click', function () {
       generateDj({ mood: settings.djMood }).then(function (d) {
         showTab('dj');
-        toast('DJ 歌单已生成：' + d.songs.length + ' 首（规则生成，非大模型）');
+        toast(d.songs.length ? ('DJ 歌单已生成：' + d.songs.length + ' 首（规则生成，非大模型）') : 'DJ 歌单是空的：登录网易云后用你的歌单生成，或先听几首歌再试');
       });
     });
     $('sw4b-dj-play').addEventListener('click', function () {
@@ -1365,10 +1354,10 @@
       '<button class="primary" id="sw4b-rec-gen">生成混合推荐</button> ' +
       '<button id="sw4b-rec-play">▶ 播放推荐</button>' +
       '<div id="sw4b-rec-out">' + (rec ?
-        '<p>平台推荐 ' + rec.platformCount + ' 首' + (rec.platformReason ? '（' + esc(rec.platformReason) + '）' : '') + ' · 本地画像 ' + rec.localCount + ' 首' + (rec.coldStart ? ' · ' + esc(rec.fallbackLabel) : '') + '</p>' + songRows(rec.songs)
+        '<p>平台推荐 ' + rec.platformCount + ' 首' + (rec.platformReason ? '（' + esc(rec.platformReason) + '）' : '') + ' · 本地画像 ' + rec.localCount + ' 首' + (rec.coldStart && rec.songs && rec.songs.length ? ' · ' + esc(rec.fallbackLabel) : '') + '</p>' + songRows(rec.songs) + ((rec.songs && rec.songs.length) ? '' : '<p class="sw4b-note">推荐是空的：登录网易云后用你的歌单生成推荐，或先搜歌听几首。</p>')
         : '<p class="sw4b-note">还没有推荐，点“生成”试试。</p>') + '</div>';
     $('sw4b-rec-gen').addEventListener('click', function () {
-      hybridRecommend().then(function (r) { showTab('rec'); toast('混合推荐已生成：' + r.songs.length + ' 首'); });
+      hybridRecommend().then(function (r) { showTab('rec'); toast(r.songs.length ? ('混合推荐已生成：' + r.songs.length + ' 首') : '推荐是空的：登录网易云后用你的歌单生成推荐，或先搜歌听几首'); });
     });
     $('sw4b-rec-play').addEventListener('click', function () {
       if (!state.lastRecommend) hybridRecommend().then(function () { playRecommend(); showTab('rec'); });

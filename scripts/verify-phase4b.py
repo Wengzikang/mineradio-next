@@ -4,11 +4,13 @@ Serves web/public via scripts/range-http-server.py on 127.0.0.1:4174 and
 drives it with Playwright (relay 18082 for external hosts), same harness
 as scripts/verify-phase3.py.
 Covers task items A-H:
-  A rule AI DJ: generate (line + '规则生成，非大模型' label), play demo queue
+  A rule AI DJ: generate (line + '规则生成，非大模型' label), play a seeded
+    fixture queue (demo songs were deleted 2026-11-10 at Ma's order, so the
+    DJ pool is seeded with the local fixture instead)
   B hybrid recommend: platform recommend_songs attempt + local mix + dedupe +
     playable-first sort, cold-start fallback label
   C music report: day/week/month/year compute from real listen history
-    (seeded by real demo playback), annual share card canvas export,
+    (seeded by real fixture playback), annual share card canvas export,
     export/clear data entry points
   D theme packs: 5 built-ins (names must not reuse original preset names),
     apply/import/export, cover-color theme (honest fallback)
@@ -19,7 +21,7 @@ Covers task items A-H:
   G mobile P1/P2: no Google Fonts, gesture default off, portrait shelf,
     PWA install status, double-tap like, long-press menu, shake/gyro toggles
   H repo/redirect URI references updated to mineradio-next
-  + light regression: phase3 demo queue, phase4a removed, no page errors
+  + light regression: demo songs removed, phase4a removed, no page errors
 Usage:
   ~/workspace/.venv-playwright/bin/python scripts/verify-phase4b.py [--smoke]
 --smoke: fast bounded check only (load, no pageerror, FAB + tabs visible,
@@ -41,8 +43,38 @@ RANGE_PORT = 4174
 RANGE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'range-http-server.py')
 BASE_URL = 'http://127.0.0.1:4174/'
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LOCAL_MP3 = '/tmp/sw-local-test.mp3'
 
 report = {'console_errors': [], 'page_errors': [], 'failed_requests': [], 'checks': {}}
+
+
+def prepare_test_files():
+    """(Re)generate the deterministic fixture mp3 in /tmp (same file as
+    verify-phase3.py; the demo songs were deleted 2026-11-10 at Ma's order,
+    so sections A/C/E seed their queues with this fixture instead)."""
+    r = subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
+                        '-f', 'lavfi', '-i', 'anoisesrc=color=white:duration=30',
+                        '-codec:a', 'libmp3lame', '-q:a', '4', LOCAL_MP3],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError('ffmpeg failed to generate LOCAL_MP3: ' + (r.stderr or ''))
+
+
+def import_fixture(page):
+    """Import the generated MP3 fixture as a local file and return the
+    imported song object (blob URL; the same real-analyser chain the deleted
+    demo songs used to exercise). Playing a local file with no cached beat
+    map opens the local-beat analysis modal, so close it (it would block
+    later pointer actions such as the cover double-tap)."""
+    page.set_input_files('#file-input', LOCAL_MP3)
+    page.wait_for_timeout(4000)
+    page.evaluate("() => { try { if (typeof closeLocalBeatModal === 'function') closeLocalBeatModal(); } catch (e) {} }")
+    page.wait_for_timeout(500)
+    modal_open = page.evaluate("() => { const m = document.getElementById('local-beat-modal'); return !!(m && m.classList.contains('show')); }")
+    if modal_open:
+        page.keyboard.press('Escape')
+        page.wait_for_timeout(500)
+    return page.evaluate("() => { const s = window.currentLocalSong || (window.playQueue && window.playQueue[0]) || null; return s ? { name: s.name, id: s.id, localKey: s.localKey, publicAudioUrl: s.publicAudioUrl, previewUrl: s.previewUrl, provider: s.provider, type: s.type } : null; }")
 
 
 def _port_open(port):
@@ -120,6 +152,7 @@ def dismiss_splash(page):
 
 
 def main():
+    prepare_test_files()
     smoke = '--smoke' in sys.argv
     relay_proc = ensure_relay()
     range_proc = ensure_range_server()
@@ -176,8 +209,11 @@ def main():
             rep = page.evaluate("() => window.starwavePhase4b.report.compute('year')")
             if not check('smoke.report_compute', isinstance(rep, dict) and 'totalPlays' in rep, rep):
                 failures += 1
-            dj = page.evaluate("async () => { const d = await window.starwavePhase4b.dj.generate({}); return { songs: d.songs.length, line: d.line, by: d.generatedBy }; }")
-            if not check('smoke.dj_generate', bool(dj and dj['songs'] >= 1 and dj['by'] == '规则生成，非大模型'), dj):
+            # Cold start (fresh logged-out browser, demo songs deleted): the DJ
+            # pool (weather + discover + playlist cache) is empty, so 0 songs
+            # is the correct result. Assert the generate path + label instead.
+            dj = page.evaluate("async () => { const d = await window.starwavePhase4b.dj.generate({}); return { songs: d.songs.length, line: d.line, by: d.generatedBy, hasDemo: d.songs.some(s => s.provider === 'demo') }; }")
+            if not check('smoke.dj_generate', bool(dj and isinstance(dj['songs'], int) and dj['line'] and dj['by'] == '规则生成，非大模型' and not dj['hasDemo']), dj):
                 failures += 1
             ps = page.evaluate("() => window.starwavePhase4b.particles.state()")
             if not check('smoke.particles_running', bool(ps and ps['running'] and ps['count'] > 0), ps):
@@ -192,13 +228,27 @@ def main():
             return 0 if failures == 0 else 1
 
         # ---- A. rule AI DJ ----
-        dj = page.evaluate("async () => { const d = await window.starwavePhase4b.dj.generate({}); return { songs: d.songs.length, line: d.line, by: d.generatedBy, slot: d.slot, mood: d.mood, names: d.songs.slice(0, 3).map(s => s.name) }; }")
-        if not check('A.dj_generate', bool(dj and dj['songs'] >= 3 and dj['line'] and dj['by'] == '规则生成，非大模型'), dj):
+        # Demo songs were deleted 2026-11-10 (Ma's order): the DJ pool is now
+        # weather radio + discover + playlist cache, which is empty in a fresh
+        # logged-out probe, so seed it with the local fixture (same real audio
+        # the demo songs used to provide) before asserting generate/play.
+        a_fixture = import_fixture(page)
+        a_seed = page.evaluate("""(song) => {
+          if (!song) return { seeded: 0 };
+          const mk = (n) => Object.assign({}, song, { id: (song.localKey || song.id || 'fixture') + '#dj' + n, localKey: (song.localKey || song.id || 'fixture') + '#dj' + n, name: (song.name || 'fixture') + ' (DJ' + n + ')' });
+          const songs = [mk(1), mk(2), mk(3)];
+          if (typeof homeDiscoverState !== 'undefined') homeDiscoverState.songs = songs;
+          return { seeded: songs.length, names: songs.map(s => s.name) };
+        }""", a_fixture)
+        if not check('A.dj_pool_seeded', bool(a_seed and a_seed.get('seeded', 0) >= 3), a_seed):
+            failures += 1
+        dj = page.evaluate("async () => { const d = await window.starwavePhase4b.dj.generate({}); return { songs: d.songs.length, line: d.line, by: d.generatedBy, slot: d.slot, mood: d.mood, names: d.songs.slice(0, 3).map(s => s.name), hasDemo: d.songs.some(s => s.provider === 'demo') }; }")
+        if not check('A.dj_generate', bool(dj and dj['songs'] >= 3 and dj['line'] and dj['by'] == '规则生成，非大模型' and not dj['hasDemo']), dj):
             failures += 1
         page.evaluate("() => window.starwavePhase4b.dj.play()")
         page.wait_for_timeout(4000)
         au = page.evaluate("() => { const a = window.audio; return a ? { paused: a.paused, ct: Math.round(a.currentTime * 100) / 100, dur: Math.round((a.duration || 0) * 100) / 100 } : null; }")
-        if not check('A.dj_play_demo', bool(au and not au['paused'] and au['ct'] > 0), au):
+        if not check('A.dj_play_fixture', bool(au and not au['paused'] and au['ct'] > 0), au):
             failures += 1
         q = page.evaluate("() => window.starwavePhase3.queueState()")
         if not check('A.dj_queue', bool(q and q.get('length', 0) >= 3), q):
@@ -210,13 +260,20 @@ def main():
             failures += 1
         if not check('B.hybrid_platform_reason_recorded', isinstance(rec.get('platformReason'), str), rec):
             failures += 1
-        # playable-first sort: first songs should be playable (demo or with URL)
-        playable_first = page.evaluate("async () => { const r = await window.starwavePhase4b.recommend.hybrid({}); const ok = (s) => !!(s.publicAudioUrl || s.previewUrl || s.provider === 'demo' || s.trial); return { first3: r.songs.slice(0, 3).map(ok), total: r.songs.length }; }")
-        if not check('B.hybrid_playable_first', bool(playable_first and all(playable_first['first3'])), playable_first):
+        # playable-first sort: URL-bearing songs must come before URL-less ones
+        # (the hybrid sort is a real sort by the playable predicate; demo songs
+        # no longer exist, so the check asserts sortedness + no demo provider).
+        playable_first = page.evaluate("async () => { const r = await window.starwavePhase4b.recommend.hybrid({}); const ok = (s) => !!(s.publicAudioUrl || s.previewUrl || s.trial); const flags = r.songs.map(ok); let seenFalse = false, sorted = true; flags.forEach(f => { if (!f) seenFalse = true; else if (seenFalse) sorted = false; }); return { sorted: sorted, total: r.songs.length, hasDemo: r.songs.some(s => s.provider === 'demo') }; }")
+        if not check('B.hybrid_playable_first', bool(playable_first and playable_first['sorted']), playable_first):
+            failures += 1
+        if not check('B.hybrid_no_demo_songs', bool(playable_first and not playable_first['hasDemo']), playable_first):
             failures += 1
 
         # ---- C. music report (seed with real playback: seek 55% then next) ----
-        page.evaluate("async () => { const songs = await window.starwavePhase3.demoSongs(); window.playQueue = songs; window.currentIdx = 0; await playQueueAt(0, { manual: true }); }")
+        # Fixture queue: the imported local song + a clone (demo songs were
+        # deleted 2026-11-10 at Ma's order).
+        c_fixture = import_fixture(page)
+        page.evaluate("""(song) => { const clone = Object.assign({}, song, { id: (song.localKey || song.id || 'fixture') + '#c2', localKey: (song.localKey || '') + '#c2', name: (song.name || 'fixture') + ' (2)' }); window.playQueue = [song, clone]; window.currentIdx = 0; return playQueueAt(0, { manual: true }); }""", c_fixture)
         page.wait_for_timeout(4000)
         page.evaluate("() => { const a = window.audio; if (a && a.duration) a.currentTime = a.duration * 0.55; }")
         page.wait_for_timeout(2500)
@@ -297,7 +354,10 @@ def main():
             st = page.evaluate("(s) => { window.starwavePhase4b.scenes.apply(s); return window.starwavePhase4b.particles.state(); }", sc)
             if not check('E.scene_' + sc, bool(st and st['sceneId'] == sc and st['type'] == expect), st):
                 failures += 1
-        page.evaluate("async () => { const songs = await window.starwavePhase3.demoSongs(); window.playQueue = songs; window.currentIdx = 0; await playQueueAt(0, { manual: true }); }")
+        # Fixture queue (demo songs deleted 2026-11-10): the imported local
+        # song plays through the same real-analyser chain.
+        e_fixture = import_fixture(page)
+        page.evaluate("""(song) => { window.playQueue = [song]; window.currentIdx = 0; return playQueueAt(0, { manual: true }); }""", e_fixture)
         page.wait_for_timeout(5000)
         shot = page.evaluate("() => { const s = window.starwavePhase4b.scenes.shot(); const st = window.starwavePhase4b.particles.state(); return { shot: s.id, label: s.label, stateShot: st.shotId, kick: st.kick, spec: st.spectrum }; }")
         if not check('E.segment_shot', bool(shot and shot['shot'] in ('intro', 'verse', 'chorus', 'bridge', 'outro')), shot):
@@ -325,7 +385,7 @@ def main():
         if not check('G.portrait_shelf', bool(shelf and shelf.get('portrait') is True), shelf):
             failures += 1
         page2.close()
-        # double-tap like on cover (current song is playing demo)
+        # double-tap like on cover (current song is the fixture from section E)
         before = page.evaluate("() => window.starwavePhase3.listFavorites().length")
         page.dblclick('#control-cover', timeout=5000)
         page.wait_for_timeout(800)
@@ -359,8 +419,13 @@ def main():
             failures += 1
 
         # ---- light regression ----
-        q2 = page.evaluate("async () => { const songs = await window.starwavePhase3.demoSongs(); return { n: songs.length, first: songs[0] ? songs[0].name : '' }; }")
-        if not check('regression.phase3_demo_songs', bool(q2 and q2.get('n', 0) >= 6), q2):
+        # Demo songs removed 2026-11-10 (Ma's order): both demo builders must
+        # return [] and the demo audio directory must be gone.
+        q2 = page.evaluate("async () => ({ p3: (await window.starwavePhase3.demoSongs()).length, build: (await buildStarwaveDemoSongs()).length })")
+        if not check('regression.demo_songs_removed', bool(q2 and q2.get('p3') == 0 and q2.get('build') == 0), q2):
+            failures += 1
+        demo_dir_gone = not os.path.exists(os.path.join(ROOT, 'web', 'public', 'demo'))
+        if not check('regression.demo_audio_dir_removed', demo_dir_gone, {'demo_dir_exists': not demo_dir_gone}):
             failures += 1
         spot = page.evaluate("() => !!window.starwaveSpotify")
         if not check('regression.spotify_object_present', bool(spot), {'present': spot}):

@@ -1,7 +1,7 @@
-/* StarWave 网易云 + 演示曲目模块 (Phase 2 拆移至独立文件)
+/* StarWave 网易云模块 (Phase 2 拆移至独立文件)
  * 原 index.html 第 2790-2971 行。网易云走公开 api-enhanced 社区服务；未登录仅免费曲，
  * 登录后（扫码，见 starwave-netease-login.js）可用账号权限内曲目。
- * 演示曲目为 demo/ 下已核验的公有领域/CC 曲目。GPL-3.0。 */
+ * 演示曲目已于 2026-11-10 按 Ma 的要求全部删除。GPL-3.0。 */
 /* StarWave 网易云公开 API（与 Folia Web 相同方式：公开 api-enhanced 服务；登录见 starwave-netease-login.js） */
 var STARWAVE_NETEASE_API_BASE = 'https://api-enhanced-pied-rho.vercel.app';
 
@@ -145,37 +145,8 @@ function playNeteaseWebTrial(song, idx, token) {
   song.trial = true;
   playQueueAt(idx, { allowTrialFallback: true, manual: true });
 }
-/* StarWave 演示曲目：demo/ 下 6 首已核验的公有领域/CC 曲目，首页试听推荐最前面 */
-var STARWAVE_DEMO_SONGS = [
-  { file: 'sakura.mp3', lrc: 'sakura.lrc', name: '樱花', artist: '日本民谣', duration: 209 },
-  { file: 'moli-hua.mp3', lrc: 'moli-hua.lrc', name: '茉莉花', artist: '中国民歌', duration: 162 },
-  { file: 'greensleeves.mp3', lrc: 'greensleeves.lrc', name: 'Greensleeves', artist: '英国民谣', duration: 187 },
-  { file: 'amazing-grace.mp3', lrc: 'amazing-grace.lrc', name: 'Amazing Grace', artist: '传统圣歌', duration: 234 },
-  { file: 'clair-de-lune.mp3', lrc: '', name: 'Clair de Lune', artist: '德彪西', duration: 244 },
-  { file: 'daisy-bell.mp3', lrc: 'daisy-bell.lrc', name: 'Daisy Bell', artist: '传统民谣', duration: 158 }
-];
-function starwaveDemoSong(def, index) {
-  return {
-    provider: 'demo',
-    source: 'demo',
-    type: 'demo',
-    id: 'demo-' + (index + 1) + '-' + String(def.file || '').replace(/\.mp3$/, ''),
-    name: def.name,
-    artist: def.artist,
-    album: '演示曲目',
-    cover: '',
-    duration: def.duration,
-    publicAudioUrl: 'demo/' + def.file,
-    publicLyric: '',
-    demo: true,
-    demoLrcUrl: def.lrc ? 'demo/' + def.lrc : '',
-    publicSourceLabel: '演示',
-    playable: true,
-    trial: false
-  };
-}
 /* 登录态判断（登录模块加载后可用；未加载时按未登录处理）：
- * 登录后演示曲目全部隐藏，首页/电台/DJ/推荐改用歌单里的歌。 */
+ * 登录后首页/电台/DJ/推荐改用歌单里的歌；未登录时用公共源（网易云免费曲 + iTunes 试听）。 */
 function starwaveNetEaseLoggedIn() {
   try {
     if (typeof neteaseWebHasSession === 'function' && neteaseWebHasSession()) return true;
@@ -185,14 +156,9 @@ function starwaveNetEaseLoggedIn() {
   } catch (e) {}
   return false;
 }
+/* 演示曲目已于 2026-11-10 按 Ma 的要求全部删除（曲目定义与 demo/ 音频文件均已移除，
+ * 旧文件见 git 历史）。保留本函数作兼容壳：各处调用者（首页/电台/DJ/推荐/历史）
+ * 仍可调用，恒返回 []，不展示任何演示曲目。 */
 async function buildStarwaveDemoSongs() {
-  if (starwaveNetEaseLoggedIn()) return []; /* 登录后不展示演示曲目 */
-  var songs = STARWAVE_DEMO_SONGS.map(starwaveDemoSong);
-  await Promise.all(songs.map(function(song){
-    if (!song.demoLrcUrl) return Promise.resolve();
-    return fetch(song.demoLrcUrl).then(function(res){ return res.ok ? res.text() : ''; }).then(function(text){
-      if (text) song.publicLyric = text;
-    }).catch(function(){});
-  }));
-  return songs;
+  return [];
 }

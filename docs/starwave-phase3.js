@@ -96,20 +96,11 @@
     };
     if (fresh && (song.provider === 'netease-web' || song.source === 'netease-web')) song.publicAudioUrl = '';
     if (song.localKey && !song.localUrl) song.unrestorable = true; /* 本地文件：刷新后 blob 链接失效，需重新导入 */
-    if (song.provider === 'demo' && !song.publicAudioUrl && song.demoLrcUrl) { /* 演示曲地址可由 demoLrcUrl 推回 */ }
+    if (song.provider === 'demo') song.unrestorable = true; /* 演示曲目已于 2026-11-10 全部删除，音频文件不存在 */
     return song;
   }
   function demoSongById(id) {
-    try {
-      var defs = (typeof STARWAVE_DEMO_SONGS !== 'undefined') ? STARWAVE_DEMO_SONGS : [];
-      for (var i = 0; i < defs.length; i++) {
-        var f = String(defs[i].file || '').replace(/\.mp3$/, '');
-        if (id === 'demo-' + (i + 1) + '-' + f) {
-          if (typeof starwaveDemoSong === 'function') return starwaveDemoSong(defs[i], i);
-        }
-      }
-    } catch (e) { /* ignore */ }
-    return null;
+    return null; /* 演示曲目已于 2026-11-10 全部删除；旧历史记录走搜索兜底（见 playHistoryEntry）。 */
   }
 
   /* ---------- 均衡器：三段（低架 200Hz / 中峰 1kHz / 高架 4kHz） ---------- */
@@ -128,7 +119,7 @@
   }
   function applyEq() {
     applyEqToNodes(window.starwaveEqNodes); /* initAudio 原生链路（本地文件等） */
-    applyEqToNodes(p3.eq); /* Phase 3 直连链路（演示/同源） */
+    applyEqToNodes(p3.eq); /* Phase 3 直连链路（同源） */
     storeSet(EQ_KEY, JSON.stringify(eq));
   }
   function setBand(band, db) {
@@ -155,9 +146,9 @@
   }
 
   /* ---------- 真实频谱：Phase 3 直连分析链路 ---------- */
-  /* 背景：基线对演示/网易云/iTunes 走 audioDirectMode，不建 AudioContext，
+  /* 背景：基线对网易云/iTunes 走 audioDirectMode，不建 AudioContext，
    * 全局 analyser 恒为 null，频谱是 updateDirectAudioPulse 合成的“假脉冲”。
-   * 本模块只对同源（演示曲 demo/*.mp3）与 blob（本地文件）建真实 MediaElementSource；
+   * 本模块只对同源音频与 blob（本地文件）建真实 MediaElementSource；
    * 跨域（网易云/iTunes）无 CORS 会静音，保留合成脉冲并如实标注 synthetic。 */
   var p3 = {
     ctx: null, eq: null, analyser: null, beatAnalyser: null, gain: null,
@@ -455,7 +446,7 @@
     var token = window.trackSwitchToken;
     window.currentIdx = idx;
     window.audioDirectMode = false;
-    /* 该元素若已被 Phase 3 直连图接管（演示曲），initAudio 无法再绑它：换新元素。
+    /* 该元素若已被 Phase 3 直连图接管（同源音频），initAudio 无法再绑它：换新元素。
      * （createMediaElementSource 对同一元素只允许一次，跨 AudioContext 会抛错。） */
     if (window.audio && window.audio.__sw3P3Attached) {
       try { if (!window.audio.paused) window.audio.pause(); } catch (e) { /* ignore */ }
@@ -693,7 +684,7 @@
       expectedText: expected >= 0 ? (lines[expected].text || '') : '',
       match: expected === sl.currentIdx,
       hasWords: hasWords,
-      note: hasWords ? '逐词高亮可用（YRC 词级时间戳）' : '演示 LRC 无词级时间戳，仅行级高亮；逐词进度按行内匀速估算'
+      note: hasWords ? '逐词高亮可用（YRC 词级时间戳）' : '该歌词无词级时间戳，仅行级高亮；逐词进度按行内匀速估算'
     };
   }
 
@@ -741,7 +732,7 @@
       if (btn) { btn.classList.toggle('liked', !!liked); btn.title = liked ? '取消红心' : '红心喜欢'; }
     } catch (e) { /* ignore */ }
   }
-  /* Phase 2 缺口修复：红心/收藏不再以“须登录”挡住演示/本地/网易云免费曲——非云端曲走本地收藏。 */
+  /* Phase 2 缺口修复：红心/收藏不再以“须登录”挡住本地/网易云免费曲——非云端曲走本地收藏。 */
   (function wrapToggleLike() {
     if (typeof toggleLikeSong !== 'function') return;
     var orig = toggleLikeSong;
@@ -755,7 +746,7 @@
     var fav = list[i];
     if (!fav) return false;
     var song = snapshotToSong(fav.song, true);
-    if (song.unrestorable) { toast('本地文件需重新导入：刷新页面后本地文件链接失效'); return false; }
+    if (song.unrestorable) { toast(song.provider === 'demo' ? '演示曲目已删除' : '本地文件需重新导入：刷新页面后本地文件链接失效'); return false; }
     window.playQueue = [song];
     window.currentIdx = 0;
     try { if (typeof safeRenderQueuePanel === 'function') safeRenderQueuePanel('play-favorite'); } catch (e) { /* ignore */ }
@@ -1098,7 +1089,7 @@
   }
   function favRowsHtml() {
     var list = loadFavorites();
-    if (!list.length) return '<div class="sw3-empty">还没有本地收藏。点歌曲的 ♥ 即可收藏演示 / 本地 / 网易云免费曲。</div>';
+    if (!list.length) return '<div class="sw3-empty">还没有本地收藏。点歌曲的 ♥ 即可收藏本地 / 网易云免费曲。</div>';
     return list.map(function (f, i) {
       var s = f.song || {};
       return '<div class="sw3-row"><div class="t">' + esc(s.name) + '</div><div class="s">' + esc(s.artist || '') + ' · ' + esc(s.provider || '') + '</div>' +
@@ -1158,7 +1149,7 @@
       '<output id="sw3-lyric-offset-out">' + (ls.offsetMs > 0 ? '+' : '') + (ls.offsetMs / 1000).toFixed(1) + 's</output></div>' +
       '<div class="sw3-note">当前歌词：' + (ls.currentText ? '“' + esc(ls.currentText) + '”' : '（无）') + ' · 第 ' + (ls.currentIdx == null ? '–' : (ls.currentIdx + 1)) + ' / ' + ls.lines + ' 行 · ' + esc(ls.timingSource || '无歌词') +
       '<br>' + esc(ls.note) + '</div>' +
-      '<div class="sw3-note">均衡器走 Web Audio 三段滤波（低架 200Hz / 中峰 1kHz / 高架 4kHz），对演示曲与本地文件实时生效；网易云/iTunes 跨域音频无 CORS，均衡与频谱均为合成链路，不承诺生效。</div>';
+      '<div class="sw3-note">均衡器走 Web Audio 三段滤波（低架 200Hz / 中峰 1kHz / 高架 4kHz），对本地文件实时生效；网易云/iTunes 跨域音频无 CORS，均衡与频谱均为合成链路，不承诺生效。</div>';
   }
   function renderLibraryModal() {
     var m = $('starwave-phase3-modal');

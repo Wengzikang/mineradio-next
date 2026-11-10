@@ -275,7 +275,7 @@ async function neteaseWebFetchPlaylistTracks(pid) {
   return { tracks: songs };
 }
 /* 登录后歌单里的歌：汇总 Ma 自己的歌单曲目（缓存 10 分钟），供首页试听、
- * 电台、DJ、推荐在登录后替代演示曲目使用。只在登录态下调用；未登录返回 []。 */
+ * 电台、DJ、推荐在登录后使用。只在登录态下调用；未登录返回 []。 */
 var neteaseWebMySongsCache = null;
 var neteaseWebMySongsAt = 0;
 var neteaseWebMySongsInflight = null;

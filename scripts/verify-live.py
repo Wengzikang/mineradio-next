@@ -15,6 +15,7 @@ import asyncio
 import json
 import os
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -28,6 +29,7 @@ RELAY_LOG = '/tmp/sw-relay.log'
 BASE_URL = 'https://wengzikang.github.io/mineradio-next/'
 DESKTOP_JSON = '/tmp/sw-live-desktop.json'
 MOBILE_JSON = '/tmp/sw-live-mobile.json'
+LOCAL_MP3 = '/tmp/sw-local-test.mp3'
 
 BAD_HOSTS = ('qishui', 'douyin', 'douyinvod')
 
@@ -155,14 +157,33 @@ def audio_state(page):
         " dur: Math.round((a.duration || 0) * 100) / 100, src: (a.src || '').slice(0, 120) }; }")
 
 
-def play_demo_sakura(page):
-    """Play the demo song 樱花 via the real Phase 3 queue. Returns audio samples."""
-    songs = page.evaluate("async () => { const s = await window.starwavePhase3.demoSongs(); return s.map(x => ({ name: x.name, artist: x.artist })); }")
-    idx = next((i for i, s in enumerate(songs) if '樱花' in (s.get('name') or '')), 0)
-    page.evaluate(
-        "(i) => { const p = window.starwavePhase3.demoSongs(); return p.then(function (songs) {"
-        " window.playQueue = songs; window.currentIdx = i;"
-        " if (typeof playQueueAt === 'function') return playQueueAt(i, { manual: true }); }); }", idx)
+def prepare_test_files():
+    """(Re)generate the deterministic fixture mp3 in /tmp (same file as
+    verify-phase3.py; the demo songs were deleted 2026-11-10 at Ma's order,
+    so live playback checks use this fixture instead)."""
+    r = subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
+                        '-f', 'lavfi', '-i', 'anoisesrc=color=white:duration=30',
+                        '-codec:a', 'libmp3lame', '-q:a', '4', LOCAL_MP3],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError('ffmpeg failed to generate LOCAL_MP3: ' + (r.stderr or ''))
+
+
+def play_fixture(page):
+    """Play the generated MP3 fixture via the real Phase 3 queue (demo songs
+    were deleted 2026-11-10 at Ma's order). Playing a local file with no
+    cached beat map opens the local-beat analysis modal, so close it (it
+    would block later pointer actions). Returns audio samples."""
+    page.set_input_files('#file-input', LOCAL_MP3)
+    page.wait_for_timeout(4000)
+    page.evaluate("() => { try { if (typeof closeLocalBeatModal === 'function') closeLocalBeatModal(); } catch (e) {} }")
+    page.wait_for_timeout(500)
+    modal_open = page.evaluate("() => { const m = document.getElementById('local-beat-modal'); return !!(m && m.classList.contains('show')); }")
+    if modal_open:
+        page.keyboard.press('Escape')
+        page.wait_for_timeout(500)
+    song = page.evaluate("() => { const s = window.currentLocalSong || (window.playQueue && window.playQueue[0]) || null; return s ? { name: s.name, publicAudioUrl: s.publicAudioUrl, provider: s.provider } : null; }")
+    page.evaluate("(song) => { if (!song) return; window.playQueue = [song]; window.currentIdx = 0; return playQueueAt(0, { manual: true }); }", song)
     page.wait_for_timeout(3000)
     t0 = audio_state(page)
     page.wait_for_timeout(3000)
@@ -170,9 +191,8 @@ def play_demo_sakura(page):
     advance = None
     if t0.get('ct') is not None and t1.get('ct') is not None:
         advance = round(t1['ct'] - t0['ct'], 2)
-    return {'songs_total': len(songs), 'played_index': idx,
-            'played_name': songs[idx]['name'] if songs else None, 't0': t0, 't1': t1,
-            'advance_sec': advance}
+    return {'played_index': 0, 'played_name': song['name'] if song else None,
+            't0': t0, 't1': t1, 'advance_sec': advance}
 
 
 def search_jay(page):
@@ -245,10 +265,10 @@ def run_desktop(browser):
     if not check(report, 'load.phase3_present_phase4a_absent', bool(p3 and not p4a), {'phase3': p3, 'phase4a': p4a}):
         failures += 1
 
-    demo = play_demo_sakura(page)
+    demo = play_fixture(page)
     ok_demo = bool(demo['t1'].get('exists') and not demo['t1'].get('paused')
                   and demo['advance_sec'] is not None and demo['advance_sec'] > 0)
-    if not check(report, 'play.demo_sakura_advances', ok_demo, demo):
+    if not check(report, 'play.fixture_advances', ok_demo, demo):
         failures += 1
 
     srch = search_jay(page)
@@ -330,10 +350,10 @@ def run_mobile(browser):
     if not check(report, 'mobile.portrait_shelf', bool(shelf and shelf.get('portrait') is True), shelf):
         failures += 1
 
-    demo = play_demo_sakura(page)
+    demo = play_fixture(page)
     ok_demo = bool(demo['t1'].get('exists') and not demo['t1'].get('paused')
                   and demo['advance_sec'] is not None and demo['advance_sec'] > 0)
-    if not check(report, 'play.demo_sakura_advances', ok_demo, demo):
+    if not check(report, 'play.fixture_advances', ok_demo, demo):
         failures += 1
 
     # double-tap like 0 -> 1 on the cover (fresh profile, favorites start empty).
@@ -414,6 +434,7 @@ def run_mobile(browser):
 
 
 def main():
+    prepare_test_files()
     if not _port_open(RELAY_PORT):
         print('ABORT: relay 127.0.0.1:%d not listening; per task rules, do not restart it.' % RELAY_PORT)
         return 2

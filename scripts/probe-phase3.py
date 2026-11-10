@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
-"""Focused probe: (a) why does demo currentTime jump back after seek?
-(b) why does a local file import stay paused?"""
+"""Focused probe: (a) why does fixture currentTime jump back after seek?
+(b) why does a local file import stay paused?
+(Demo songs were deleted 2026-11-10 at Ma's order; the seek probe now uses
+the generated fixture mp3 instead of the demo songs.)"""
 import json
 import os
 import subprocess
 import sys
 import time
+
+LOCAL_MP3 = '/tmp/sw-local-test.mp3'
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
 from playwright.sync_api import sync_playwright
@@ -15,6 +19,10 @@ RELAY_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'verify-
 
 def main():
     import socket
+    if not os.path.exists(LOCAL_MP3):
+        subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
+                        '-f', 'lavfi', '-i', 'anoisesrc=color=white:duration=30',
+                        '-codec:a', 'libmp3lame', '-q:a', '4', LOCAL_MP3], check=True)
     try:
         s = socket.socket(); s.connect(('127.0.0.1', 18082)); s.close()
     except OSError:
@@ -56,12 +64,15 @@ def main():
                 });
               };
             }""")
+        page.set_input_files('#file-input', LOCAL_MP3)
+        page.wait_for_timeout(4000)
         page.evaluate(
-            """async () => {
-              const songs = await window.starwavePhase3.demoSongs();
-              window.playQueue = songs;
+            """() => {
+              const song = window.currentLocalSong || (window.playQueue && window.playQueue[0]) || null;
+              if (!song) return;
+              window.playQueue = [song];
               window.currentIdx = 0;
-              await playQueueAt(0, { manual: true });
+              return playQueueAt(0, { manual: true });
             }""")
         page.wait_for_timeout(4000)
         page.evaluate("() => window.__armAudioProbe()")

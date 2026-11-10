@@ -16189,7 +16189,9 @@ function renderHomePreviewTracks() {
   if (!list) return;
   if (!homePreviewSongs.length) {
     var title = homePreviewLoading ? '正在载入试听推荐' : '搜索歌曲试听推荐';
-    var sub = homePreviewLoading ? '从试听渠道获取可播放片段' : '也可以直接在顶部输入歌名';
+    var previewLoggedIn = false;
+    try { previewLoggedIn = (typeof starwaveNetEaseLoggedIn === 'function' && starwaveNetEaseLoggedIn()); } catch (e) { previewLoggedIn = false; }
+    var sub = homePreviewLoading ? '从试听渠道获取可播放片段' : (previewLoggedIn ? '也可以直接在顶部输入歌名' : '登录网易云后显示你的歌单，也可以直接在顶部输入歌名');
     list.innerHTML = '<button class="home-preview-track" type="button" onclick="runHomeSearch(\'\')">' +
       '<span class="home-preview-track-art" aria-hidden="true"></span>' +
       '<span><span class="home-preview-track-title">' + escHtml(title) + '</span><span class="home-preview-track-sub">' + escHtml(sub) + '</span></span>' +
@@ -16210,7 +16212,7 @@ async function loadHomePreviewSongs(force) {
   if (!PUBLIC_SOURCE_EXPERIMENTAL || homePreviewLoading || (homePreviewLoaded && !force)) return;
   homePreviewLoading = true;
   renderHomePreviewTracks();
-  /* 登录后：首页试听列表只放 Ma 自己歌单里的歌，不放演示曲目。 */
+  /* 登录后：首页试听列表只放 Ma 自己歌单里的歌。 */
   if (typeof starwaveNetEaseLoggedIn === 'function' && starwaveNetEaseLoggedIn() && typeof neteaseWebFetchMyPlaylistSongs === 'function') {
     try {
       var mySongs = await neteaseWebFetchMyPlaylistSongs(60);
@@ -16223,10 +16225,6 @@ async function loadHomePreviewSongs(force) {
     return;
   }
   try {
-    var demoSongs = await buildStarwaveDemoSongs();
-    homePreviewSongs = demoSongs.map(cloneSong);
-    renderHomePreviewTracks();
-    renderHomeTiles();
     var batches = await Promise.allSettled(ITUNES_HOME_PREVIEW_QUERIES.map(function(query){
       return fetchItunesPublicSearchResults(query);
     }));
@@ -16255,7 +16253,7 @@ async function loadHomePreviewSongs(force) {
         if (songs.indexOf(song) < 0) songs.push(song);
       });
     });
-    homePreviewSongs = demoSongs.concat(songs.slice(0, 2)).map(cloneSong);
+    homePreviewSongs = songs.slice(0, 2).map(cloneSong);
     homePreviewLoaded = true;
   } catch (err) {
     console.warn('[HomePreview]', err);
@@ -21053,7 +21051,7 @@ async function fetchLyric(songOrId, token) {
     }
     if (isPublicSourceProviderKey(provider)) {
       var publicLyric = song && (song.publicLyric || song.lyric || song.lrc || '');
-      if (!publicLyric && song && song.demoLrcUrl) {
+      if (!publicLyric && song && song.demoLrcUrl && song.provider !== 'demo') {
         try {
           var demoLrcRes = await fetch(song.demoLrcUrl);
           if (demoLrcRes.ok) {
@@ -26161,7 +26159,7 @@ async function logoutActiveAccount() {
 }
 async function doLogout() {
   if (typeof neteaseWebClearSession === 'function') neteaseWebClearSession();
-  /* 退出后清除歌单曲目缓存，首页试听列表恢复为演示曲目。 */
+  /* 退出后清除歌单曲目缓存，首页试听列表恢复为公共源试听。 */
   try { if (typeof neteaseWebClearMySongsCache === 'function') neteaseWebClearMySongsCache(); } catch (e) {}
   try { if (typeof loadHomePreviewSongs === 'function') loadHomePreviewSongs(true); } catch (e) {}
   try {

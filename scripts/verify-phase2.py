@@ -5,7 +5,8 @@ Checks:
   (a) page load: 0 uncaught errors / console errors (Phase 2 files loaded)
   (b) 8 views open: home, search, lyrics stage, shelf/playlist panel,
       playlist detail, DIY console, listening profile, settings/about
-  (c) demo track plays
+  (c) fixture track plays (demo songs were deleted 2026-11-10 at Ma's order;
+      the generated local mp3 fixture is imported and played instead)
   (d) netease search + free track play / login prompt
   (e) Spotify login button opens auth URL with client_id, redirect_uri,
       scope, code_challenge, code_challenge_method=S256, state; verifier in localStorage
@@ -70,6 +71,37 @@ def audio_state(page):
         }""")
 
 
+LOCAL_MP3 = '/tmp/sw-local-test.mp3'
+
+
+def prepare_test_files():
+    """(Re)generate the deterministic fixture mp3 in /tmp (same file as
+    verify-phase3.py; the demo songs were deleted 2026-11-10 at Ma's order,
+    so playback steps use this fixture instead)."""
+    r = subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
+                        '-f', 'lavfi', '-i', 'anoisesrc=color=white:duration=30',
+                        '-codec:a', 'libmp3lame', '-q:a', '4', LOCAL_MP3],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError('ffmpeg failed to generate LOCAL_MP3: ' + (r.stderr or ''))
+
+
+def import_fixture(page):
+    """Import the generated MP3 fixture as a local file and return the
+    imported song object (blob URL). Playing a local file with no cached
+    beat map opens the local-beat analysis modal, so close it (it would
+    block later pointer actions)."""
+    page.set_input_files('#file-input', LOCAL_MP3)
+    page.wait_for_timeout(4000)
+    page.evaluate("() => { try { if (typeof closeLocalBeatModal === 'function') closeLocalBeatModal(); } catch (e) {} }")
+    page.wait_for_timeout(500)
+    modal_open = page.evaluate("() => { const m = document.getElementById('local-beat-modal'); return !!(m && m.classList.contains('show')); }")
+    if modal_open:
+        page.keyboard.press('Escape')
+        page.wait_for_timeout(500)
+    return page.evaluate("() => { const s = window.currentLocalSong || (window.playQueue && window.playQueue[0]) || null; return s ? { name: s.name, id: s.id, localKey: s.localKey, publicAudioUrl: s.publicAudioUrl, previewUrl: s.previewUrl, provider: s.provider, type: s.type } : null; }")
+
+
 def toast_text(page):
     return page.evaluate(
         "() => { const t = document.getElementById('toast');"
@@ -100,6 +132,7 @@ def secret_scan():
 
 
 def main():
+    prepare_test_files()
     report['secret_scan'] = secret_scan()
     with sync_playwright() as pw:
         relay_proc = ensure_relay()
@@ -165,15 +198,17 @@ def main():
         except Exception as e:
             views['search'] = 'FAIL: %s' % e
         page.screenshot(path='/tmp/sw-v2-search.png')
-        # 3 lyrics stage: play demo, open lyrics panel
+        # 3 lyrics stage: play the fixture (demo songs deleted 2026-11-10),
+        # open lyrics panel (the fixture has no lyrics, so lyricLines is 0)
         try:
-            page.locator('#home-preview-list .home-preview-track').first.click()
+            fixture = import_fixture(page)
+            page.evaluate("(song) => { if (!song) return; window.playQueue = [song]; window.currentIdx = 0; return playQueueAt(0, { manual: true }); }", fixture)
             page.wait_for_timeout(4000)
             st = audio_state(page)
-            views['demo_playing'] = bool(st.get('exists') and not st.get('paused'))
-            views['demo_src'] = st.get('src', '')
+            views['fixture_playing'] = bool(st.get('exists') and not st.get('paused'))
+            views['fixture_src'] = st.get('src', '')
         except Exception as e:
-            views['demo_playing'] = 'FAIL: %s' % e
+            views['fixture_playing'] = 'FAIL: %s' % e
         page.evaluate("() => { if (typeof toggleLyricsPanel === 'function') toggleLyricsPanel(true); }")
         page.wait_for_timeout(800)
         views['lyrics_stage'] = page.evaluate(
@@ -384,11 +419,14 @@ def main():
         mob.wait_for_timeout(1500)
         mob.evaluate("() => { if (typeof loadHomeDiscover === 'function') loadHomeDiscover(true); }")
         mob.wait_for_timeout(1500)
+        # Play the fixture (demo songs deleted 2026-11-10); a 2-song queue so
+        # the swipe can change the track.
         try:
-            mob.locator('#home-preview-list .home-preview-track').first.click()
+            mob_fixture = import_fixture(mob)
+            mob.evaluate("(song) => { if (!song) return; const clone = Object.assign({}, song, { id: (song.localKey || song.id || 'fixture') + '#m2', localKey: (song.localKey || '') + '#m2', name: (song.name || 'fixture') + ' (2)' }); window.playQueue = [song, clone]; window.currentIdx = 0; return playQueueAt(0, { manual: true }); }", mob_fixture)
             mob.wait_for_timeout(4000)
         except Exception as e:
-            print('mobile demo click fail:', e)
+            print('mobile fixture play fail:', e)
         mob_audio_before = audio_state(mob)
         mob_track_before = mob.evaluate("() => (window.playQueue[window.currentIdx]||{}).name || ''")
         # swipe left (next) via touchscreen tap/drag simulation

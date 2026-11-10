@@ -1,7 +1,7 @@
 /* StarWave Phase 2 (2026-11-09)
  * Spotify 官方 PKCE + Web Playback SDK（复用 Folia 应用 "Music"，不新建应用）；
  * Apple Music 仅框架（官方 MusicKit JS 方向，无 Token、无密钥）；
- * 私人电台（规则电台：演示曲 + 网易云免费曲 + iTunes 试听）；
+ * 私人电台（规则电台：网易云免费曲 + iTunes 试听）；
  * 移动端 P0（100dvh + 安全区、滑动切歌、Media Session、性能总督）；
  * 设置/关于页（源码链接、音源状态、总督手动档位）。
  * 约束：QQ/酷狗/酷我不接播放；不恢复扩展；不碰桌面代码；无费用；
@@ -101,7 +101,7 @@
       '<p id="sw-apple-status">待授权（需 Apple Developer 会员 + 服务端签发 Token，待 Ma 解锁 Apple ID 后办理）。' +
       '本站不复制任何从 music.apple.com 提取 developer token 的做法。</p>' +
       '<h3>私人电台</h3>' +
-      '<p>按时间段 / 心情拼真实播放队列：演示曲 + 网易云免费曲 + iTunes 30 秒试听，能播、能切歌。</p>' +
+      '<p>按时间段 / 心情拼真实播放队列：网易云免费曲 + iTunes 30 秒试听，能播、能切歌。</p>' +
       '<div class="sw-mood-row" id="sw-mood-row"></div>' +
       '<div class="btn-row" style="justify-content:flex-start">' +
       '<button class="modal-btn primary" type="button" onclick="window.starwaveRadio.start()">开始电台</button>' +
@@ -150,7 +150,6 @@
       '<div class="sw-src-row"><b>网易云</b><span>非官方社区服务，仅免费曲 · 未登录</span></div>' +
       '<div class="sw-src-row"><b>Spotify</b><span>' + (sp && sp.isLoggedIn() ? '已登录 · 完整播放需 Premium' : '待授权 · 仅元数据展示') + '</span></div>' +
       '<div class="sw-src-row"><b>Apple Music</b><span>待授权（需 Developer 会员 + 服务端 Token）</span></div>' +
-      '<div class="sw-src-row"><b>演示曲目</b><span class="ok">可播 · 公有领域 / CC</span></div>' +
       '<div class="sw-src-row"><b>iTunes 试听</b><span class="ok">可播 · 30 秒公开预览</span></div>' +
       '<div class="sw-src-row"><b>QQ / 酷狗 / 酷我</b><span class="muted">不接播放 · 仅元数据展示 + 跳转官方</span></div>';
     var spEl = $('sw-spotify-status');
@@ -724,33 +723,26 @@
     var def = null;
     for (var i = 0; i < RADIO_MOODS.length; i++) if (RADIO_MOODS[i].id === moodId) def = RADIO_MOODS[i];
     if (!def) def = RADIO_MOODS[0];
-    /* 登录后：电台队列只用歌单里的歌（洗牌取 20 首），不混演示曲目。 */
+    /* 登录后：电台队列只用歌单里的歌（洗牌取 20 首）。 */
     if (typeof starwaveNetEaseLoggedIn === 'function' && starwaveNetEaseLoggedIn() && typeof neteaseWebFetchMyPlaylistSongs === 'function') {
       return neteaseWebFetchMyPlaylistSongs(60).catch(function () { return []; }).then(function (songs) {
         var list = (songs || []).slice();
         for (var i = list.length - 1; i > 0; i--) { var j = Math.floor(Math.random() * (i + 1)); var t = list[i]; list[i] = list[j]; list[j] = t; }
         var queue = list.slice(0, 20);
-        return { queue: queue, def: def, counts: { demo: 0, neteaseFree: queue.length, itunes: 0 } };
+        return { queue: queue, def: def, counts: { neteaseFree: queue.length, itunes: 0 } };
       });
     }
-    var jobs = [];
-    var demos = [];
-    try {
-      if (typeof buildStarwaveDemoSongs === 'function') demos = buildStarwaveDemoSongs();
-    } catch (e) { demos = []; }
-    var demoP = (demos && typeof demos.then === 'function') ? demos : Promise.resolve(demos || []);
     var neP = (typeof fetchNeteaseWebSearchResults === 'function')
       ? fetchNeteaseWebSearchResults(def.query).catch(function () { return []; })
       : Promise.resolve([]);
     var itP = (typeof fetchItunesPublicSearchResults === 'function')
       ? fetchItunesPublicSearchResults(def.itunesQuery || def.query).catch(function () { return []; })
       : Promise.resolve([]);
-    return Promise.all([demoP, neP, itP]).then(function (parts) {
-      var demoList = parts[0] || [];
-      var neList = (parts[1] || []).filter(function (s) { return s && (s.fee || 0) === 0; }).slice(0, 8);
-      var itList = (parts[2] || []).slice(0, 6);
-      var queue = interleave([demoList, neList, itList], 20);
-      return { queue: queue, def: def, counts: { demo: demoList.length, neteaseFree: neList.length, itunes: itList.length } };
+    return Promise.all([neP, itP]).then(function (parts) {
+      var neList = (parts[0] || []).filter(function (s) { return s && (s.fee || 0) === 0; }).slice(0, 8);
+      var itList = (parts[1] || []).slice(0, 6);
+      var queue = interleave([neList, itList], 20);
+      return { queue: queue, def: def, counts: { neteaseFree: neList.length, itunes: itList.length } };
     });
   }
   window.starwaveRadio = {
@@ -766,7 +758,7 @@
       if (moodId) { radioState.mood = moodId; self.mood = moodId; }
       toast('私人电台拼队列中…（' + moodLabel(radioState.mood) + '）');
       return buildRadioQueue(radioState.mood).then(function (built) {
-        if (!built.queue.length) { toast((typeof starwaveNetEaseLoggedIn === 'function' && starwaveNetEaseLoggedIn()) ? '电台队列为空：歌单里还没有可播的歌' : '电台队列为空：演示曲与公共源均不可用'); return null; }
+        if (!built.queue.length) { toast((typeof starwaveNetEaseLoggedIn === 'function' && starwaveNetEaseLoggedIn()) ? '电台队列为空：歌单里还没有可播的歌' : '电台队列为空：公共源均不可用，请先登录网易云'); return null; }
         try {
           window.playQueue = built.queue.slice();
           window.currentIdx = -1;
@@ -777,7 +769,7 @@
         renderMoodRow();
         updateRadioChip();
         toast('私人电台已开始：' + moodLabel(radioState.mood) + ' · ' + built.queue.length +
-          ' 首（演示 ' + built.counts.demo + ' / 网易云免费 ' + built.counts.neteaseFree + ' / iTunes 试听 ' + built.counts.itunes + '）');
+          ' 首（网易云免费 ' + built.counts.neteaseFree + ' / iTunes 试听 ' + built.counts.itunes + '）');
         if (typeof playQueueAt === 'function') return playQueueAt(0, { manual: true, context: { radio: 'starwave', mood: radioState.mood } });
         return built;
       }).catch(function (e) {
