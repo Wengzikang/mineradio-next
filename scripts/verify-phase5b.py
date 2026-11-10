@@ -328,17 +328,28 @@ def main():
             lines_t = [float(x.split('|')[0]) for x in lyr0['lines']]
 
             # ---- prewarm builds the next line ahead ----
+            # Wait until the NEXT line specifically is cached (not just any
+            # build): the cached text must equal lyricsLines[currentIdx+1].
             built = False
             snap = snap0
+            next_txt = {}
             for _ in range(80):  # up to ~40s
                 page.wait_for_timeout(500)
                 snap = prewarm_snapshot(page)
-                if snap and snap['stats']['builds'] >= 1 and snap['cacheSize'] >= 1:
+                next_txt = page.evaluate(
+                    "() => { const s = window.starwavePhase5.prewarm.snapshot();"
+                    " const idx = s.currentIdx + 1;"
+                    " const lines = (typeof lyricsLines !== 'undefined' ? lyricsLines : []);"
+                    " const norm = t => String(t || '').replace(/\\s+/g, ' ').trim();"
+                    " const want = (idx >= 0 && idx < lines.length) ? norm(lines[idx].text) : '';"
+                    " return { want: want, idx: idx, cachedTexts: s.items.map(i => i.text),"
+                    " match: want ? s.items.some(i => i.text === want) : false }; }")
+                if snap and snap['stats']['builds'] >= 1 and snap['cacheSize'] >= 1 and next_txt.get('match'):
                     built = True
                     break
             trig = (snap or {}).get('stats', {}).get('triggers', {})
             if not check('p3b.prewarm_builds_next_line', built,
-                         {'snapshot': snap, 'triggers': trig}):
+                         {'snapshot': snap, 'triggers': trig, 'nextLine': next_txt}):
                 failures += 1
 
             # ---- next-line switch consumes the prebuilt mesh ----
@@ -516,10 +527,36 @@ def main():
                             and snap_post_switch['stats']['builds'] > builds_pre):
                         switch_ok = True
                         break
+            # Round-2 fix (Minor 2): the post-switch cache must hold no
+            # old-token items (snapshot items now carry token).
+            old_token_gone = True
+            if snap_post_switch:
+                old_token_gone = all(i.get('token') == snap_post_switch.get('trackToken')
+                                     for i in snap_post_switch.get('items', []))
+            switch_ok = switch_ok and old_token_gone
             if not check('p3b.track_switch_prewarm', bool(switched and switch_ok),
                          {'switched': switched, 'attempts': switch_attempts,
                           'triggersBefore': ts_pre, 'buildsBefore': builds_pre,
-                          'tokenBefore': token_pre, 'snapshotAfter': snap_post_switch}):
+                          'tokenBefore': token_pre, 'snapshotAfter': snap_post_switch,
+                          'oldTokenGone': old_token_gone}):
+                failures += 1
+
+            # ---- same-lyrics re-apply dedup (Minor 2) ----
+            # Re-applying the identical lyrics with the same track token must
+            # not clear/rebuild: snapshot items/keys are identical immediately
+            # after the synchronous re-apply (no poll tick can interleave).
+            dedup = page.evaluate(
+                "() => { const p = window.starwavePhase5.prewarm;"
+                " const b = p.snapshot();"
+                " window.applyLyricsState(window.lyricsLines, window.lyricsHasNativeKaraoke, window.lyricsTimingSource);"
+                " const a = p.snapshot();"
+                " return { wrapped: !!b.wrapped.applyLyricsState,"
+                " sizeBefore: b.cacheSize, sizeAfter: a.cacheSize,"
+                " keysBefore: b.items.map(i => i.key), keysAfter: a.items.map(i => i.key),"
+                " buildsBefore: b.stats.builds, buildsAfter: a.stats.builds }; }")
+            dedup_ok = (dedup['wrapped'] and dedup['sizeAfter'] == dedup['sizeBefore']
+                        and dedup['keysAfter'] == dedup['keysBefore'])
+            if not check('p3b.same_lyrics_reapply_no_rebuild', dedup_ok, dedup):
                 failures += 1
 
             # ---- low-end guard (live eco test, tier restored after) ----

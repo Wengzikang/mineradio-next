@@ -42,3 +42,9 @@ fetchNeteaseWebSearchResults 支持 offset、[data-search-load-more] 逐页追�
 潮汐荧光，全部免费）；小工具（P9，starwave-phase5.js：存储统计与 Cache Storage
 清理、性能探针）；Phase 5A review fixes：取页失败保留“加载更多”供重试、新搜索/
 切换模式丢弃旧分页状态、清理缓存排除离线外壳缓存 starwave-pwa-v1。
+
+2026-11-10，StarWave Phase 5B：舞台歌词预热（P3，starwave-phase5.js：
+单行预热缓存——切歌/恢复/下一行/快进触发，按总督档位限容，eco 档关闭；
+全轨预热与常驻构建因无上游 payload 系统且单行显存开销大而未做）；P2 YRC
+已暂停（api-enhanced /lyric 不返回 yrc/ytlrc）。Phase 5B review fixes：
+样式键补字体/字重/字距、快照带 token、验证脚本补缓存文本与去重检查。

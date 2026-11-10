@@ -38,8 +38,9 @@
  * Spike 映射证据（上游钩子 → StarWave 全局变量）：
  *   - stageLyricPrewarmBuildGuardKey（样式键）→ prewarmStyleKey()：
  *     stageLyrics.palette 四色 + fx.lyricColorMode/lyricColor/lyricLineHeight/
- *     lyricScale/preset/lyricGlow；上游的 display/translation 模式 StarWave 没有，
- *     不在键里（StarWave 舞台渲染器无此分支）。
+ *     lyricScale/preset/lyricGlow + lyricFont/lyricWeight/lyricLetterSpacing
+ *     （字体/字重/字距同样烘焙进画布纹理；Round-2 评审 Minor 1 后补入）；
+ *     上游的 display/translation 模式 StarWave 没有，不在键里（StarWave 舞台渲染器无此分支）。
  *   - stageLyricRenderSignatureForCurrentState（需上游 00-state 存储）→ 改写为
  *     trackSwitchToken + 归一化歌词文本 + prewarmStyleKey()；StarWave 无状态存储，
  *     签名即缓存键，消费时再校验 token/style 双字段。
@@ -319,16 +320,30 @@
   function prewarmNormalizeText(text) {
     return String(text || '').replace(/\s+/g, ' ').trim();
   }
-  /* 样式键：上游 stageLyricPrewarmBuildGuardKey 的 StarWave 改写（见文件头映射）。 */
+  /* 样式键：上游 stageLyricPrewarmBuildGuardKey 的 StarWave 改写（见文件头映射）。
+   * 字体/字重/字距与 lyricFontCss()/lyricFontWeightValue()/lyricLetterSpacingPx()
+   * 同口径：stone-song 恒 900；字重 clamp 500–900 后按 50 取整；字距 clamp -0.04–0.18。 */
   function prewarmStyleKey() {
     try {
       var pal = (typeof stageLyrics !== 'undefined' && stageLyrics && stageLyrics.palette) || {};
       var f = (typeof fx !== 'undefined' && fx) || {};
+      var fontKey = '';
+      try { fontKey = (typeof normalizeLyricFontKey === 'function') ? normalizeLyricFontKey(f.lyricFont) : String(f.lyricFont || ''); } catch (e) { fontKey = String(f.lyricFont || ''); }
+      var weight = 900;
+      try {
+        if (fontKey !== 'stone-song') {
+          var w = Number(f.lyricWeight) || 900;
+          weight = Math.round(Math.min(900, Math.max(500, w)) / 50) * 50;
+        }
+      } catch (e) { weight = 900; }
+      var spacing = 0;
+      try { spacing = Math.min(0.18, Math.max(-0.04, Number(f.lyricLetterSpacing) || 0)); } catch (e) { spacing = 0; }
       return [
         f.lyricColorMode || '', f.lyricColor || '',
         Number(f.lyricLineHeight) || 1, Number(f.lyricScale) || 1,
         (f.preset == null ? '' : f.preset), f.lyricGlow ? 'glow' : 'noglow',
-        pal.primary || '', pal.secondary || '', pal.highlight || '', pal.glowColor || pal.glow || ''
+        pal.primary || '', pal.secondary || '', pal.highlight || '', pal.glowColor || pal.glow || '',
+        fontKey, weight, spacing
       ].join('|');
     } catch (e) { return 'unknown'; }
   }
@@ -455,7 +470,7 @@
       if (!text || text.length > PREWARM_MAX_TEXT_LEN) return false;
       var key = prewarmCacheKey(text);
       if (prewarmState.items[key] && prewarmState.items[key].mesh) return 'cached';
-      if (prewarmState.scheduled[key]) return 'cached';
+      if (prewarmState.scheduled[key]) return 'scheduled'; /* 仅排队未建：不是 cached */
       var tokenAtSchedule = prewarmTrackToken();
       var styleAtSchedule = prewarmStyleKey();
       var r = reason || 'next-line';
@@ -618,7 +633,7 @@
     var items = [];
     prewarmState.order.forEach(function (k) {
       var it = prewarmState.items[k];
-      if (it) items.push({ key: k, text: it.text, reason: it.reason, builtAt: it.builtAt });
+      if (it) items.push({ key: k, text: it.text, token: it.token, reason: it.reason, builtAt: it.builtAt });
     });
     return {
       version: '5b-p3',
