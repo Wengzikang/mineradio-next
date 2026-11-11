@@ -117,7 +117,7 @@
       '<option value="high">手动 · 高</option>' +
       '<option value="ultra">手动 · 超高</option>' +
       '</select><span id="sw-gov-fps">帧率 -- fps</span></div>' +
-      '<p>自动模式下连续低帧率会自动降一档（粒子/像素预算随档位变化），只降不自动升；手动选择后以手动为准。</p>' +
+      '<p>自动模式下连续低帧率会自动降一档（粒子/像素预算随档位变化），只降不自动升；自动降档只在本次打开内生效，不会写入存档，下次打开恢复为存档档位；手动选择后以手动为准。</p>' +
       '<h3>移动端</h3>' +
       '<p>100dvh + 安全区适配；主舞台左右滑动切歌；锁屏通过 Media Session 显示标题 / 封面 / 上一首 / 下一首。</p>' +
       '<div class="btn-row"><button class="modal-btn" type="button" onclick="window.starwaveCloseAbout()">关闭</button></div>' +
@@ -875,9 +875,13 @@
         var idx = GOVERNOR_TIERS.indexOf(tier);
         if (idx > 0) {
           var next = GOVERNOR_TIERS[idx - 1];
-          if (typeof setPerformanceQualityMode === 'function') setPerformanceQualityMode(next, true);
+          /* 2026-11-11 粒子清晰度修复：自动降档只改本次会话，不写存档。
+             旧行为调 setPerformanceQualityMode 会经 saveLyricLayout 把降档
+             持久化，且总督只降不升，手机卡过一次就永久钉在 eco（DPR 0.95）。 */
+          if (typeof applyPerformanceQualitySessionOnly === 'function') applyPerformanceQualitySessionOnly(next);
+          else if (typeof setPerformanceQualityMode === 'function') setPerformanceQualityMode(next, true);
           toast('性能总督：实测 ' + fps + 'fps，已自动降至' +
-            (next === 'eco' ? '低' : next === 'balanced' ? '中' : next === 'ultra' ? '超高' : '高') + '档');
+            (next === 'eco' ? '低' : next === 'balanced' ? '中' : next === 'ultra' ? '超高' : '高') + '档（仅本次打开生效）');
         }
       }
     } else {

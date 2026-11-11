@@ -2386,7 +2386,7 @@ html.control-glass-svg-ok #visual-guide-btn:hover{
   <div class="fx-section-label">存储占用</div>
   <div class="sw5-storage" id="sw5-storage">
     <div class="sw5-storage-text">浏览器存储：<span id="sw5-storage-value">正在统计…</span></div>
-    <div class="sw5-storage-note">清理缓存只删网页缓存（Service Worker / Cache Storage），不动歌单、设置与本地数据；离线外壳缓存 starwave-pwa-v1 会保留，离线打开不受影响。</div>
+    <div class="sw5-storage-note">清理缓存只删网页缓存（Service Worker / Cache Storage），不动歌单、设置与本地数据；离线外壳缓存 starwave-pwa-v2 会保留，离线打开不受影响。</div>
     <div class="sw5-storage-btns">
       <button class="fx-mini-btn ghost" type="button" id="sw5-storage-refresh">刷新</button>
       <button class="fx-mini-btn ghost" type="button" id="sw5-storage-clear">清理网页缓存</button>
@@ -5879,10 +5879,17 @@ renderer.domElement.addEventListener('dblclick', function(e){
 function makeDotTexture() {
   var cv = document.createElement('canvas'); cv.width = cv.height = 64;
   var ctx = cv.getContext('2d');
+  /* 2026-11-11 粒子清晰度修复：旧贴图是全半径径向衰减（中心 0.96 → 边缘 0），
+     每个粒子都是没有边的柔光团；实测贴图 90%→10% 过渡宽约 20px/64px，渲染后
+     圆点亮核仅约 3px、晕边 10–23px，33k 个点叠加就是一团糊。
+     新贴图是硬边圆盘：70% 半径内全不透明，边缘在 70%→100% 半径内陡降至 0
+     （90%→10% 过渡约 8px/64px），每个粒子都有看得见的边；仍保留圆形外观。
+     此贴图共用于全部 Points 层（主粒子云/背景层/歌词星尘/其他），bloom 层
+     默认关闭，开启时光晕边也会变硬，是清晰度的代价，已记录。 */
   var g = ctx.createRadialGradient(32, 32, 0, 32, 32, 31);
-  g.addColorStop(0.00, 'rgba(255,255,255,0.96)');
-  g.addColorStop(0.42, 'rgba(255,255,255,0.78)');
-  g.addColorStop(0.72, 'rgba(255,255,255,0.22)');
+  g.addColorStop(0.00, 'rgba(255,255,255,1)');
+  g.addColorStop(0.70, 'rgba(255,255,255,1)');
+  g.addColorStop(0.85, 'rgba(255,255,255,0.45)');
   g.addColorStop(1.00, 'rgba(255,255,255,0)');
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, 64, 64);
@@ -7577,6 +7584,7 @@ var lyricTiltEuler = new THREE.Euler(0, 0, 0, 'YXZ');
 var lyricBaseQuat = new THREE.Quaternion();
 var lyricTiltQuat = new THREE.Quaternion();
 var lyricTargetQuat = new THREE.Quaternion();
+var lyricViewportFitVec = new THREE.Vector3();
 var LYRIC_CAMERA_LOCK_MAX_SCALE = 0.80;
 function setStageLyricViewBasisFromCameraOrQuaternion(fallbackQuat) {
   if (fallbackQuat) {
@@ -7635,7 +7643,73 @@ function lyricCameraLockFit(layoutScale, layoutX, layoutY, distance) {
   var scaledH = Math.max(0.01, bounds.h * layoutScale);
   var viewportFit = Math.min(1, safeW / scaledW, safeH / scaledH);
   var lockScaleCap = Math.min(1, (skullSafe ? 0.94 : LYRIC_CAMERA_LOCK_MAX_SCALE) / layoutScale);
-  return clampRange(Math.min(viewportFit, lockScaleCap), skullSafe ? 0.36 : 0.42, 1);
+  return clampRange(Math.min(viewportFit, lockScaleCap), skullSafe ? 0.36 : 0.28, 1);
+}
+// R1 竖屏修复（2026-11-11 第二轮）：壁纸分支的歌单架避让偏移改为屏幕空间感知。
+// 原 -1.34 世界单位左移在横屏可视宽约 11.8 单位时无害（歌词 cx≈344，x0≥184，
+// 是“避让歌单架”的设计意图），但在竖屏可视宽仅约 2.5 单位时把整个歌词推出屏外
+// （实测 cx≈-21，x0≈-105）。本函数按“未适配尺寸”（lockFit=1，取最保守的半宽）
+// 算出歌词在当前视口内允许的最大左移量：视口越窄，允许量越小；窄到容不下任何
+// 左移时返回 0，歌词居中。横屏下允许量约 4.1，远大于 1.34，故横屏行为与修复前
+// 一致，避让意图保留；竖屏下允许量为 0，偏移取消。距离基准与 lyricCameraLockFit
+// 一致（相机锚定距离），半宽取未适配值，故本钳制是保守的：实际渲染时 lockFit
+// 只会再缩小歌词，不会反超。竖屏 pinned 态实测：中心卡在屏右 x≈286–473，
+// 歌词带 y≈415–427 与卡片纵向重叠，居中歌词约与卡左缘重叠 68px；但竖屏 preset 0
+// 的已验收行为本就是居中歌词，本函数仍取居中（重叠在可读范围内，歌词渲染在卡片之上）。
+function wallpaperLyricAvoidShift(layoutScale, distance) {
+  // F1/F2（2026-11-11 第 1 轮审查）：无相机时安全回退为 0（不偏移、居中），
+  // 而不是未钳制的 -1.34——本函数的目标是“永不把歌词推出左缘”。实际不可达
+  //（无相机时 updateStageLyrics3D 不渲染歌词），纯防御。
+  if (!camera || !camera.isPerspectiveCamera) return 0;
+  var fov = (camera.fov || 45) * Math.PI / 180;
+  var dist = Math.max(1.4, distance || 4.85);
+  var visibleH = 2 * Math.tan(fov * 0.5) * dist;
+  var visibleW = visibleH * (camera.aspect || (innerWidth / Math.max(1, innerHeight)) || 1.78);
+  var bounds = getStageLyricLockBounds();
+  var halfText = Math.max(0.01, bounds.w * Math.max(0.1, layoutScale || 1)) / 2;
+  var marginWorld = 8 * visibleW / Math.max(1, innerWidth);
+  var allowed = Math.max(0, visibleW / 2 - halfText - marginWorld);
+  return -Math.min(1.34, allowed);
+}
+// R2 竖屏修复（2026-11-11 第二轮）：无 focus + lock 关时歌词锚定在封面粒子云原点，
+// lockFit=1，竖屏下 15 字歌词宽约 1069px、x0≈-333，21 字宽约 1164px、x0≈-389，
+// 直接溢出视口。本函数把当前字形矩形投影到屏幕，若左右任一缘出屏则按宽度比
+// 算出需要的缩放（与 lyricCameraLockFit 等价的宽度比钳制，区别是这里用实测投影
+// 宽——封面锚定路径的相机距离与相机锚定路径不同，不能直接套用 lock 距离），
+// 只在确实溢出时返回 <1；能容纳时返回 1，不改变行为。缩放关于字形中心进行，
+// 不移动中心（竖屏 preset 5 下歌词中心稳定在 cx≈242，是该 preset 相机取景把
+// 封面锚定歌词框在偏右位置所致，属取景行为而非溢出，不由本函数处理）。
+// 下限 0.20：实测 15/21 字竖屏约需 0.32–0.47，留有余量。
+function stageLyricOverflowFit(layoutScale) {
+  if (!camera || !camera.isPerspectiveCamera) return 1;
+  var cur = stageLyrics.current;
+  if (!cur || !cur.userData || !cur.userData.lyric) return 1;
+  var d = cur.userData.lyric;
+  var tm = d.textMesh;
+  if (!tm || !isFinite(d.textWorldW) || d.textWorldW <= 0 || !isFinite(d.textWorldH) || d.textWorldH <= 0) return 1;
+  tm.updateWorldMatrix(true, false);
+  var hw = d.textWorldW / 2, hh = d.textWorldH / 2;
+  var x0 = Infinity, x1 = -Infinity;
+  var corners = [[-hw, -hh, 0], [hw, -hh, 0], [hw, hh, 0], [-hw, hh, 0]];
+  for (var i = 0; i < corners.length; i++) {
+    lyricViewportFitVec.set(corners[i][0], corners[i][1], corners[i][2]);
+    tm.localToWorld(lyricViewportFitVec);
+    lyricViewportFitVec.project(camera);
+    if (!isFinite(lyricViewportFitVec.x)) return 1;
+    var sx = (lyricViewportFitVec.x * 0.5 + 0.5) * innerWidth;
+    if (sx < x0) x0 = sx;
+    if (sx > x1) x1 = sx;
+  }
+  if (!(x1 > x0)) return 1;
+  var cx = (x0 + x1) / 2;
+  var halfL = cx - x0, halfR = x1 - cx;
+  if (halfL <= 0 || halfR <= 0) return 1;
+  var margin = 8;
+  var factor = Math.min(1, (cx - margin) / halfL, (innerWidth - margin - cx) / halfR);
+  if (factor >= 0.999) return 1;
+  var curGroupScale = (stageLyrics.group && isFinite(stageLyrics.group.scale.x) && stageLyrics.group.scale.x > 0)
+    ? stageLyrics.group.scale.x : Math.max(0.1, layoutScale || 1);
+  return clampRange((curGroupScale / Math.max(0.1, layoutScale || 1)) * factor, 0.20, 1);
 }
 // 兼容旧变量名以便其它代码不破坏
 var lyricsParticles = null;
@@ -7878,6 +7952,20 @@ function readSavedLyricLayout() {
     var savedShelfAngle = savedShelfAngleManual
       ? clampRange(raw.shelfAngleY == null ? shelfDefaultAngleForCameraMode(savedShelfCameraMode) : Number(raw.shelfAngleY), -30, 30)
       : shelfDefaultAngleForCameraMode(savedShelfCameraMode);
+    /* 画质档位一次性迁移（2026-11-11 粒子清晰度修复）：
+       旧版性能总督自动降档会经 setPerformanceQualityMode → saveLyricLayout
+       把降档结果写入存档，且总督只降不升——手机一旦卡过一次（连续 6 秒
+       <25fps）就永久钉在 eco（渲染 DPR 上限 0.95，DPR=3 的手机上整层 3D
+       以约 1/3 分辨率渲染再放大 3.16 倍显示，粒子/卡片/歌词全糊），下次打开
+       也恢复不了。存量档位低于 high 且无手动选择标记的，视为这种误持久化
+       的自动降档，恢复为默认 high；用户手动选过档位（有标记）的不动。
+       此后手动档位由 performanceQualityManual / performanceQualityManualTier
+       跟踪，自动降档只改本次会话的生效档位，永不写入存档。 */
+    var savedQualityManual = raw.performanceQualityManual === true;
+    var savedQuality = normalizePerformanceQuality(raw.performanceQuality);
+    var savedQualityTier = (!savedQualityManual
+      && (savedQuality === 'eco' || savedQuality === 'balanced'))
+      ? fxDefaults.performanceQuality : savedQuality;
     return {
       preset: savedPreset,
       intensity: clampRange(Number(raw.intensity) || fxDefaults.intensity, 0.2, 1.6),
@@ -7936,7 +8024,9 @@ function readSavedLyricLayout() {
       desktopLyricsHighlight: desktopLyricsSchemaReady ? raw.desktopLyricsHighlight === true : fxDefaults.desktopLyricsHighlight,
       desktopLyricsFps: desktopLyricsSchemaReady ? normalizeDesktopLyricsFps(raw.desktopLyricsFps) : fxDefaults.desktopLyricsFps,
       performanceBackground: normalizePerformanceBackgroundMode(raw.performanceBackground, raw.liveBackgroundKeep === true),
-      performanceQuality: normalizePerformanceQuality(raw.performanceQuality),
+      performanceQuality: savedQualityTier,
+      performanceQualityManual: savedQualityManual,
+      performanceQualityManualTier: savedQualityTier,
       liveBackgroundKeep: normalizePerformanceBackgroundMode(raw.performanceBackground, raw.liveBackgroundKeep === true) === 'keep',
       wallpaperMode: false,
       wallpaperOpacity: clampRange(raw.wallpaperOpacity == null ? fxDefaults.wallpaperOpacity : Number(raw.wallpaperOpacity), 0.35, 1),
@@ -8026,7 +8116,9 @@ function saveLyricLayout() {
       desktopLyricsHighlight: fx.desktopLyricsHighlight === true,
       desktopLyricsFps: normalizeDesktopLyricsFps(fx.desktopLyricsFps),
       performanceBackground: normalizePerformanceBackgroundMode(fx.performanceBackground, fx.liveBackgroundKeep === true),
-      performanceQuality: normalizePerformanceQuality(fx.performanceQuality),
+      performanceQuality: normalizePerformanceQuality(fx.performanceQualityManualTier || fx.performanceQuality),
+      performanceQualityManual: !!fx.performanceQualityManual,
+      performanceQualityManualTier: normalizePerformanceQuality(fx.performanceQualityManualTier || fx.performanceQuality),
       liveBackgroundKeep: normalizePerformanceBackgroundMode(fx.performanceBackground, fx.liveBackgroundKeep === true) === 'keep',
       wallpaperMode: false,
       wallpaperOpacity: clampRange(fx.wallpaperOpacity == null ? fxDefaults.wallpaperOpacity : Number(fx.wallpaperOpacity), 0.35, 1),
@@ -9373,19 +9465,30 @@ function updateStageLyrics3D(dt) {
   var shelfLyricAvoid = shouldAvoidStageLyricsForShelf();
   var wallpaperLyricLock = shouldUseWallpaperLyricCameraLock();
   var wallpaperShelfLyrics = wallpaperLyricLock && shouldDimWallpaperForShelf();
+  var lockBaseDistance = wallpaperShelfLyrics ? 5.58 : 4.85;
   if (wallpaperLyricLock) {
     layoutScale *= wallpaperShelfLyrics ? 0.60 : 0.84;
-    layoutX = clampRange(layoutX + (wallpaperShelfLyrics ? -1.34 : 0), -2.0, 2.0);
     layoutY = clampRange(layoutY + (wallpaperShelfLyrics ? -0.04 : 0.08), -1.2, 1.35);
     layoutZ = clampRange(layoutZ + (wallpaperShelfLyrics ? 1.02 : 1.15), -1.6, 1.6);
-  } else if (!skullMouthLyrics && shelfLyricAvoid && fx.lyricCameraLock) {
-    layoutScale *= 0.72;
-    layoutX = clampRange(layoutX - 1.36, -2.0, 2.0);
-    layoutY = clampRange(layoutY + 0.06, -1.2, 1.35);
-    layoutZ = clampRange(layoutZ + 0.72, -1.6, 1.6);
+    // R1（第二轮）：避让偏移改为屏幕空间感知（见 wallpaperLyricAvoidShift）。
+    // layoutZ 先算好，因为偏移量需要最终的锚定距离；三行赋值本身互不依赖，
+    // 只是调换了顺序，数值与原来一致。横屏仍为 -1.34，竖屏为 0。
+    layoutX = clampRange(layoutX + (wallpaperShelfLyrics ? wallpaperLyricAvoidShift(layoutScale, lockBaseDistance + layoutZ) : 0), -2.0, 2.0);
   } else if (!skullMouthLyrics && shouldOffsetLyricsForShelfDetail()) {
     layoutScale *= normalShelfDetailOpen ? 0.56 : 0.70;
-    layoutX = clampRange(layoutX - (normalShelfDetailOpen ? 1.78 : 1.58), -2.0, 2.0);
+    // F1（2026-11-11 第 1 轮审查）：删掉详情分支的 layoutX -= 1.78 / 1.58 世界
+    // 单位左移（只删这一行，scale/Y/Z 与调暗 profile 全部保留）。实测证明
+    // 该偏移在两条锚定路径上都是错的，不是只在相机锚定时多余：
+    // ① 相机锚定（dynamic 或 lock 开）：锚点已在视轴中央，-1.78 再左移
+    //    177–336px，竖屏整行出屏（修复前实测 cx -119～-141，x0 -190～-229）；
+    // ② 封面锚定（static + lock 关）：锚点本身就是居中的封面粒子云原点
+    //    （无详情时横屏 cx 464、竖屏 cx ~202），-1.78 把它推到横屏 cx 272–
+    //    280、竖屏 cx -131。R1 式屏幕空间钳制修不了它（横屏允许量约 3.5 >
+    //    1.78，偏移会原样保留）；只在相机锚定时清零也修不了 ②。删掉后歌词
+    //    回到锚点中心（0.56 缩放 + 0.38 调暗保留，仍让位于详情面板）。
+    //    例外：preset 5 + lock 开走壁纸分支（上一条 if），不受本行影响，
+    //    横屏仍保留 -1.34 避让（R3 开放决策）；竖屏 preset 5 封面锚定帧取景
+    //    cx~242（见 H3R2 注释），宽度适配后只断言不溢出。
     layoutY = clampRange(layoutY + (normalShelfDetailOpen ? 0.18 : 0.08), -1.2, 1.35);
     layoutZ = clampRange(layoutZ + 0.84, -1.6, 1.6);
   }
@@ -9397,11 +9500,17 @@ function updateStageLyrics3D(dt) {
       layoutZ = clampRange(layoutZ + 0.18, -1.6, 1.6);
     }
   }
-  var lockBaseDistance = wallpaperShelfLyrics ? 5.58 : 4.85;
   var lockDistance = lockBaseDistance + layoutZ;
-  var cameraLockedLyrics = (fx.lyricCameraLock || wallpaperLyricLock) && camera;
+  var cameraLockedLyrics = (fx.lyricCameraLock || wallpaperLyricLock || (orbit.focus.active && /^shelf-/.test(String(orbit.focus.type || '')))) && camera;
   var skullLyricEdgeGuard = !!(fx && fx.preset === SKULL_PRESET_INDEX && (orbit.centerLocked || orbit.recentering));
   var lockFit = (cameraLockedLyrics || skullLyricEdgeGuard || skullMouthLyrics) ? lyricCameraLockFit(layoutScale, layoutX, layoutY, skullMouthLyrics ? Math.max(2.2, 4.4 + layoutZ) : lockDistance) : 1;
+  if (!cameraLockedLyrics && !skullLyricEdgeGuard && !skullMouthLyrics && !(fx && fx.preset === SKULL_PRESET_INDEX)) {
+    // R2（第二轮）：无 focus + lock 关时若歌词投影溢出视口则启用适配缩放；
+    // 能容纳时 stageLyricOverflowFit 返回 1，本行不改变 lockFit。骷髅 preset
+    // 不走这里（另有骷髅嘴分支与 edge guard，本轮范围只覆盖 preset 0/5）。
+    var overflowFit = stageLyricOverflowFit(layoutScale);
+    if (overflowFit < 1) lockFit = Math.min(lockFit, overflowFit);
+  }
   if (skullMouthLyrics) lockFit = Math.min(lockFit, 1.12);
   if (!isFinite(stageLyrics.lockFitScale)) stageLyrics.lockFitScale = 1;
   stageLyrics.lockFitScale += (lockFit - stageLyrics.lockFitScale) * (lockFit < stageLyrics.lockFitScale ? 0.18 : 0.10);
@@ -13415,12 +13524,12 @@ function makeShelfManager() {
     var cv = card.canvas, ctx = card.ctx;
     var W = cv.width, H = cv.height;
     ctx.clearRect(0, 0, W, H);
-    var pad = 18;
+    var pad = 36;
     var isNow = item.type === 'queue' && item.tag === '正在播放';
     var shelfLook = shelfSettings();
 
     // 卡片底
-    makeRoundRect(ctx, pad, pad, W - pad*2, H - pad*2, 32);
+    makeRoundRect(ctx, pad, pad, W - pad*2, H - pad*2, 64);
     ctx.fillStyle = 'rgba(0,0,0,' + shelfLook.bgOpacity.toFixed(3) + ')'; ctx.fill();
     var grad = ctx.createLinearGradient(0, 0, W, H);
     grad.addColorStop(0, 'rgba(255,255,255,0.10)');
@@ -13429,33 +13538,33 @@ function makeShelfManager() {
 
     if (isNow) {
       ctx.strokeStyle = shelfAccentRgba(0.72);
-      ctx.lineWidth = 1.8 + Math.sin(uniforms.uTime.value * 3) * 0.28 + bass * 1.2;
+      ctx.lineWidth = 3.6 + Math.sin(uniforms.uTime.value * 3) * 0.56 + bass * 2.4;
     } else {
       ctx.strokeStyle = 'rgba(255,255,255,0.14)';
-      ctx.lineWidth = 1.1;
+      ctx.lineWidth = 2.2;
     }
     ctx.stroke();
 
     if (card.selected) {
       ctx.save();
-      makeRoundRect(ctx, pad + 2, pad + 2, W - pad*2 - 4, H - pad*2 - 4, 30);
+      makeRoundRect(ctx, pad + 4, pad + 4, W - pad*2 - 8, H - pad*2 - 8, 60);
       ctx.shadowColor = shelfAccentRgba(0.58);
-      ctx.shadowBlur = 18;
+      ctx.shadowBlur = 36;
       ctx.strokeStyle = shelfAccentRgba(0.72);
-      ctx.lineWidth = 2.2;
+      ctx.lineWidth = 4.4;
       ctx.stroke();
       ctx.restore();
     }
 
     // 大封面方块
-    var coverSize = H - pad*2 - 8;
-    var cx = pad + 6, cy = pad + 4;
-    makeRoundRect(ctx, cx, cy, coverSize, coverSize, 26);
+    var coverSize = H - pad*2 - 16;
+    var cx = pad + 12, cy = pad + 8;
+    makeRoundRect(ctx, cx, cy, coverSize, coverSize, 52);
     ctx.fillStyle = 'rgba(255,255,255,0.04)'; ctx.fill();
     if (item.cover) {
       var rec = playlistCoverCache[item.cover];
       if (rec && rec.loaded && rec.img) {
-        ctx.save(); makeRoundRect(ctx, cx, cy, coverSize, coverSize, 26); ctx.clip();
+        ctx.save(); makeRoundRect(ctx, cx, cy, coverSize, coverSize, 52); ctx.clip();
         ctx.drawImage(rec.img, cx, cy, coverSize, coverSize); ctx.restore();
       } else if (!rec || (!rec.loading && !rec.failed)) {
         requestPlaylistCover(item.cover, function(){ drawCard(card, item); });
@@ -13463,59 +13572,59 @@ function makeShelfManager() {
     }
 
     // 文本区
-    var tx = pad + coverSize + 32;
-    ctx.font = '700 17px Inter, Arial';
+    var tx = pad + coverSize + 64;
+    ctx.font = '700 34px Inter, Arial';
     ctx.fillStyle = isNow ? shelfAccentRgba(0.92) : 'rgba(255,255,255,0.92)';
-    ctx.fillText(item.tag || '', tx, pad + 36);
+    ctx.fillText(item.tag || '', tx, pad + 72);
 
-    ctx.font = '700 30px Inter, Arial';
+    ctx.font = '700 60px Inter, Arial';
     ctx.fillStyle = 'rgba(255,255,255,0.96)';
-    wrapText(ctx, item.title || '', tx, pad + 78, W - tx - pad - 14, 36, 2);
+    wrapText(ctx, item.title || '', tx, pad + 156, W - tx - pad - 28, 72, 2);
 
-    ctx.font = '400 17px Inter, Arial';
+    ctx.font = '400 34px Inter, Arial';
     ctx.fillStyle = 'rgba(255,255,255,0.52)';
-    wrapText(ctx, item.sub || '', tx, pad + 156, W - tx - pad - 14, 24, 2);
+    wrapText(ctx, item.sub || '', tx, pad + 312, W - tx - pad - 28, 48, 2);
 
     // 律动进度条
     ctx.strokeStyle = isNow ? shelfAccentRgba(0.90) : 'rgba(255,255,255,0.30)';
-    ctx.lineWidth = 3.5;
+    ctx.lineWidth = 7;
     ctx.beginPath();
-    ctx.moveTo(tx, H - pad - 22);
-    ctx.lineTo(tx + Math.min(260, 80 + bass * 320), H - pad - 22);
+    ctx.moveTo(tx, H - pad - 44);
+    ctx.lineTo(tx + Math.min(520, 160 + bass * 640), H - pad - 44);
     ctx.stroke();
 
     if (card.isCenter) {
-      var actionY = H - pad - 78;
+      var actionY = H - pad - 156;
       if (item.type === 'playlist') {
-        makeRoundRect(ctx, tx, actionY, 138, 38, 18);
-        var playGrad = ctx.createLinearGradient(tx, actionY, tx + 138, actionY + 38);
+        makeRoundRect(ctx, tx, actionY, 276, 76, 36);
+        var playGrad = ctx.createLinearGradient(tx, actionY, tx + 276, actionY + 76);
         playGrad.addColorStop(0, 'rgba(255,255,255,0.88)');
         playGrad.addColorStop(0.55, shelfAccentRgba(0.94));
         playGrad.addColorStop(1, shelfAccentRgba(0.58));
         ctx.fillStyle = playGrad; ctx.fill();
         ctx.strokeStyle = shelfAccentRgba(0.44);
-        ctx.lineWidth = 1.1; ctx.stroke();
-        ctx.font = '800 14px Inter, "Microsoft YaHei", Arial';
+        ctx.lineWidth = 2.2; ctx.stroke();
+        ctx.font = '800 28px Inter, "Microsoft YaHei", Arial';
         ctx.fillStyle = readableInkForHex(shelfAccentHex());
-        ctx.fillText('▶ 播放歌单', tx + 25, actionY + 24);
+        ctx.fillText('▶ 播放歌单', tx + 50, actionY + 48);
 
-        makeRoundRect(ctx, tx + 150, actionY, 104, 38, 18);
+        makeRoundRect(ctx, tx + 300, actionY, 208, 76, 36);
         ctx.fillStyle = 'rgba(255,255,255,0.055)'; ctx.fill();
         ctx.strokeStyle = 'rgba(255,255,255,0.14)';
-        ctx.lineWidth = 1.1; ctx.stroke();
-        ctx.font = '700 14px Inter, "Microsoft YaHei", Arial';
+        ctx.lineWidth = 2.2; ctx.stroke();
+        ctx.font = '700 28px Inter, "Microsoft YaHei", Arial';
         ctx.fillStyle = 'rgba(255,255,255,0.78)';
-        ctx.fillText('详情', tx + 184, actionY + 24);
+        ctx.fillText('详情', tx + 368, actionY + 48);
       } else if (item.type === 'queue') {
-        ctx.font = '600 14px Inter, "Microsoft YaHei", Arial';
+        ctx.font = '600 28px Inter, "Microsoft YaHei", Arial';
         ctx.fillStyle = shelfAccentRgba(0.84);
-        ctx.fillText('点击播放', tx, actionY + 25);
+        ctx.fillText('点击播放', tx, actionY + 50);
       }
     }
 
     var dof = card.dofBlur || 0;
     if (dof > 0.12) {
-      makeRoundRect(ctx, pad, pad, W - pad*2, H - pad*2, 32);
+      makeRoundRect(ctx, pad, pad, W - pad*2, H - pad*2, 64);
       ctx.fillStyle = 'rgba(0,0,0,' + Math.min(0.28, dof * 0.18).toFixed(3) + ')';
       ctx.fill();
     }
@@ -13525,11 +13634,12 @@ function makeShelfManager() {
 
   function buildOneCard(item, i) {
     var cv = document.createElement('canvas');
-    cv.width = 720; cv.height = 360;
+    cv.width = 1440; cv.height = 720;
     var ctx = cv.getContext('2d');
     var tx = new THREE.CanvasTexture(cv);
     tx.minFilter = THREE.LinearFilter; tx.magFilter = THREE.LinearFilter;
     tx.generateMipmaps = false;
+    tx.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy ? renderer.capabilities.getMaxAnisotropy() : 1);
     var mat = new THREE.MeshBasicMaterial({ map: tx, transparent: true, opacity: 0.96, depthWrite: false, depthTest: false, side: THREE.DoubleSide });
     var geo = new THREE.PlaneGeometry(2.05, 1.025, 1, 1);
     var mesh = new THREE.Mesh(geo, mat);
@@ -15116,7 +15226,7 @@ function requestPlaylistCover(url, cb) {
     rec.loading = false; rec.failed = true;
     rec.waiters.splice(0).forEach(function(fn){ setTimeout(function(){ fn(null); }, 0); });
   };
-  var src = coverProxySrc(url);
+  var src = coverProxySrc(coverUrlWithSize(url, 640));
   if (!src) {
     rec.loading = false; rec.failed = true;
     rec.waiters.splice(0).forEach(function(fn){ setTimeout(function(){ fn(null); }, 0); });
@@ -23800,6 +23910,9 @@ function setPerformanceBackgroundMode(mode, silent) {
 function setPerformanceQualityMode(mode, silent) {
   var next = normalizePerformanceQuality(mode);
   fx.performanceQuality = next;
+  /* 手动选择：记为用户手动档位并持久化（总督自动降档不走这里，见下）。 */
+  fx.performanceQualityManual = true;
+  fx.performanceQualityManualTier = next;
   updatePerformanceControls();
   applyRendererPowerMode();
   saveLyricLayout();
@@ -23807,6 +23920,15 @@ function setPerformanceQualityMode(mode, silent) {
     var label = next === 'eco' ? '低' : (next === 'balanced' ? '中' : (next === 'ultra' ? '超高' : '高'));
     showToast('画质档位: ' + label);
   }
+}
+/* 总督自动降档专用（2026-11-11 粒子清晰度修复）：只改本次会话的生效档位，
+   不写存档、不改手动标记。旧行为调 setPerformanceQualityMode 会经
+   saveLyricLayout 把自动降档持久化，且总督只降不升，手机一旦卡过就永久
+   钉在 eco，下次打开也恢复不了。 */
+function applyPerformanceQualitySessionOnly(mode) {
+  fx.performanceQuality = normalizePerformanceQuality(mode);
+  updatePerformanceControls();
+  applyRendererPowerMode();
 }
 function updateFxInputs() {
   normalizeDevelopmentLockedFxState();
@@ -24736,7 +24858,15 @@ function bindFxPanel() {
   });
   document.querySelectorAll('#performance-quality-seg [data-performance-quality]').forEach(function(btn){
     btn.addEventListener('click', function(){
-      setPerformanceQualityMode(btn.getAttribute('data-performance-quality'));
+      // F3（2026-11-11 第 1 轮审查）：段位按钮是手动选档，必须同步把总督切到
+      // 手动（与 About 里总督下拉框的 setMode 行为一致），否则 governor.mode
+      // 仍为 'auto'，会话内总督仍会把手动选的高档位自动降档，About 文案
+      // “手动选择后以手动为准”在会话内不成立。setMode 内部会调
+      // setPerformanceQualityMode(m, true)（静默，不双 toast）；phase2 未加
+      // 载时回退到直接调 setPerformanceQualityMode（旧行为）。
+      var next = btn.getAttribute('data-performance-quality');
+      if (window.starwavePerfGovernor && typeof window.starwavePerfGovernor.setMode === 'function') window.starwavePerfGovernor.setMode(next);
+      else setPerformanceQualityMode(next);
     });
   });
   updateFxInputs();

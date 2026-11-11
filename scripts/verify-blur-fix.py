@@ -66,6 +66,13 @@ def main():
         'web/public/index.html', 'web/public/starwave-phase4b.js',
         'docs/index.html', 'docs/starwave-phase4b.js',
         'scripts/verify-blur-fix.py', 'scripts/verify-phase4b.py',
+        # 2026-11-11 SW 缓存根治（父级授权新增范围）：CACHE_NAME 升版 v2、
+        # .js 网络优先、CORE_ASSETS 预缓存、phase5 clearCaches 按前缀排除。
+        'web/public/pwa-service-worker.js', 'docs/pwa-service-worker.js',
+        'web/public/starwave-phase5.js', 'docs/starwave-phase5.js',
+        # 2026-11-11 第三轮粒子清晰度（Ma 15:46 反馈新增范围）：总督降档
+        # 只在本次会话生效、不再持久化 + 存量 eco 档位一次性迁移回 high。
+        'web/public/starwave-phase2.js', 'docs/starwave-phase2.js',
     }
     known_5c = {
         'NOTICE.md', 'scripts/verify-phase5c.py',
