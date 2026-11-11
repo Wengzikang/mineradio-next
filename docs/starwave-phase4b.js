@@ -78,7 +78,7 @@
   var GESTURE_OPTIN_KEY = 'starwave-phase4b-gesture-optin-v1';
   var settings = {
     themeId: '',               /* 空 = 未选主题，用默认 */
-    particleType: 'stardust',
+    particleType: 'blocks', /* 2026-11-11 发糊修复：默认改为方块（每块跟随一个频段震动，边缘锐利）；星尘/雨/雪/萤火仍可在特效面板切换 */
     sceneId: 'starry',
     petEnabled: true,
     petId: 'tuantuan',
@@ -640,11 +640,11 @@
 
   /* ---------- E. 高级粒子 + 3D 场景包 + 段落镜头 ---------- */
   var SCENES = [
-    { id: 'starry', name: '星空', particle: 'stardust', bg: 'radial-gradient(120% 100% at 50% 0%, #1e293b 0%, #0b1220 55%, #020617 100%)' },
+    { id: 'starry', name: '星空', particle: 'blocks', bg: 'radial-gradient(120% 100% at 50% 0%, #1e293b 0%, #0b1220 55%, #020617 100%)' },
     { id: 'ocean', name: '海洋', particle: 'firefly', bg: 'linear-gradient(180deg, #083344 0%, #04202b 55%, #01161f 100%)' },
     { id: 'rainy', name: '雨夜', particle: 'rain', bg: 'linear-gradient(180deg, #1e1b4b 0%, #12041f 60%, #020617 100%)' }
   ];
-  var PARTICLE_BASE = { stardust: 140, rain: 220, snow: 160, firefly: 70 };
+  var PARTICLE_BASE = { stardust: 140, rain: 220, snow: 160, firefly: 70, blocks: 48 };
   var SHOTS = [
     { id: 'intro', label: '前奏', from: 0, to: 0.12, transform: 'scale(1.02) translateY(0px)', zoom: 1.02, tx: 0, ty: 0 },
     { id: 'verse', label: '主歌', from: 0.12, to: 0.45, transform: 'scale(1.0) translateX(-6px)', zoom: 1.0, tx: -6, ty: 0 },
@@ -655,6 +655,9 @@
   var particle = {
     canvas: null, ctx: null, bg: null, parts: [], type: 'stardust',
     running: false, raf: 0, lastT: 0, fpsEma: 60, budget: 1, kick: 0, spectrum: { low: 0, mid: 0, high: 0 },
+    /* 方块频段（2026-11-11）：24 个对数频段的实时能量 0..1；audioActive 为真表示当前是真实音频数据，
+       为假表示无音频/暂停，绘制时走环境律动兜底（不是假音频）。 */
+    bands: [], audioActive: false,
     sceneId: 'starry', shotId: '', shotLabel: '', frame: 0,
     /* 镜头缩放/平移的当前值与目标值：逐帧在画布内变换中缓动（见 particleTick），
        替代原来对 canvas 元素的 CSS transform 缩放，避免对已栅格化位图的二次采样放大导致发糊。
@@ -706,6 +709,16 @@
     else if (t === 'rain') { p.x = Math.random() * (w + 100); p.y = -20 - Math.random() * h; p.vx = -1.2; p.vy = 9 + Math.random() * 7; p.r = 0.8 + Math.random() * 0.8; p.len = 12 + Math.random() * 14; }
     else if (t === 'snow') { p.y = -10 - Math.random() * h; p.vx = (Math.random() - 0.5) * 0.5; p.vy = 0.6 + Math.random() * 1.1; p.r = 1 + Math.random() * 2.4; p.sway = Math.random() * Math.PI * 2; }
     else if (t === 'firefly') { p.vx = (Math.random() - 0.5) * 0.5; p.vy = (Math.random() - 0.5) * 0.4; p.r = 1.2 + Math.random() * 2.2; p.hue = 50 + Math.random() * 40; }
+    else if (t === 'blocks') {
+      /* 方块：方形粒子，band 按生成序号轮流分配 24 个频段（48 个方块 → 每个频段 2 个）；
+         位置限制在屏幕上部约 3/4，避开底部播放条与宠物区；边长 9–18 CSS px，肉眼可辨。 */
+      p.band = particle.parts.length % BLOCK_BANDS;
+      p.r = 9 + Math.random() * 9;
+      p.x = 10 + Math.random() * Math.max(10, w - 20);
+      p.y = h * 0.06 + Math.random() * Math.max(10, h * 0.66);
+      p.vx = (Math.random() - 0.5) * 0.15; p.vy = (Math.random() - 0.5) * 0.12;
+      p.hue = 160 + Math.random() * 120;
+    }
     return p;
   }
   function rebuildParticles() {
@@ -724,6 +737,26 @@
       if (tier === 'ultra') return 1.0;
       return 1.0;
     } catch (e) { return 1; }
+  }
+  /* 方块频段：24 个对数频段的 bin 边界（fftSize 2048，采样率 44.1k/48k 时 bin 宽约 21.5–23.4Hz；
+     bin 2 ≈ 43Hz，bin 560 ≈ 12kHz，覆盖音乐主要能量区）。
+     注意：round 后的原始边界在低频端会撞车（b=1 与 b=2 都是 3），不处理会产生宽度为 0 的空段——
+     那段的方块永远读不到能量。预计算时强制严格递增，每段至少 1 个 bin（2026-11-11 审查 round 1 实锤）。 */
+  var BLOCK_BANDS = 24;
+  var BLOCK_EDGES = (function () {
+    var e = [];
+    for (var b = 0; b <= BLOCK_BANDS; b++) {
+      if (b === 0) e.push(2);
+      else if (b === BLOCK_BANDS) e.push(560);
+      else e.push(Math.round(2 * Math.pow(560 / 2, b / BLOCK_BANDS)));
+    }
+    for (var i = 1; i < e.length; i++) { if (e[i] <= e[i - 1]) e[i] = e[i - 1] + 1; }
+    return e;
+  })();
+  function blockBandEdge(b) {
+    if (b <= 0) return BLOCK_EDGES[0];
+    if (b >= BLOCK_BANDS) return BLOCK_EDGES[BLOCK_BANDS];
+    return BLOCK_EDGES[b];
   }
   function readAudioDrive() {
     /* 音频驱动：Kick 触发 + 频谱映射，复用 Phase 3 的 beatInfo/spectrumSample；
@@ -748,6 +781,33 @@
     } catch (e) { /* ignore */ }
     particle.kick = kick;
     particle.spectrum = spec;
+    /* 方块频段：直接读 Phase 3 每帧写入 window.frequencyData 的真实频谱（1024 bin），
+       每频段取峰值（比 RMS 对起音更敏感，与 Phase 3 kick 检测用峰值的理由一致）。
+       只有“正在播放且频谱里确实有能量”才算真实音频；否则 bands 归零、audioActive=false，
+       方块走环境律动——绝不用环境数据冒充音频反应。 */
+    var bandsOk = false;
+    try {
+      var a = (typeof audio !== 'undefined') ? audio : window.audio;
+      var playing = !!(a && !a.paused && a.src);
+      var fd = window.frequencyData;
+      if (playing && fd && fd.length >= 64) {
+        var mx = 0;
+        for (var bi = 0; bi < fd.length; bi++) if (fd[bi] > mx) mx = fd[bi];
+        if (mx > 0) {
+          for (var bb = 0; bb < BLOCK_BANDS; bb++) {
+            var e0 = blockBandEdge(bb), e1 = blockBandEdge(bb + 1);
+            var peak = 0;
+            for (var k = e0; k < e1 && k < fd.length; k++) { var v = fd[k] / 255; if (v > peak) peak = v; }
+            var target = clamp(peak, 0, 1);
+            var cur = particle.bands[bb] || 0;
+            particle.bands[bb] = cur + (target - cur) * (target > cur ? 0.6 : 0.25);
+          }
+          bandsOk = true;
+        }
+      }
+    } catch (e) { /* ignore */ }
+    if (!bandsOk) { for (var b2 = 0; b2 < BLOCK_BANDS; b2++) particle.bands[b2] = 0; }
+    particle.audioActive = bandsOk;
   }
   function segmentShot() {
     /* 段落镜头：按播放进度分段（前奏/主歌/副歌/间奏/尾奏），纯前端能量曲线分段；
@@ -797,7 +857,9 @@
         rebuildParticles();
       }
     }
-    if (particle.frame % 10 === 0) readAudioDrive();
+    /* 方块要跟得上音乐：频段每 3 帧读一次（60fps 手机上约 20Hz，方块伸缩才跟得上节拍；
+       旧的 10 帧一读约 6Hz，方块会一步一顿。读一次只是 560 个 bin 的峰值扫描，开销可忽略。） */
+    if (particle.frame % 3 === 0) readAudioDrive();
     if (particle.frame % 30 === 0) segmentShot();
     var ctx = particle.ctx;
     if (!ctx) return;
@@ -830,6 +892,20 @@
       if (p.x > w + 30) p.x = -20;
       if (p.x < -30) p.x = w + 20;
       var alpha = clamp(p.a * (0.6 + 0.4 * Math.sin(p.tw)) * (1 + kick * 0.8), 0, 1);
+      if (particle.type === 'blocks') {
+        /* 方块：边长跟随本频段能量伸缩（播放时为真实频谱数据；无音频时为环境律动，
+           见 readAudioDrive 的 audioActive 标记）。整数坐标 + 整数边长 + fillRect，
+           无 shadowBlur、无渐变，边缘锐利；位置也在 2D 变换里逐帧重栅格化，不经过 CSS 缩放。 */
+        var lvl = 0;
+        if (particle.audioActive) { lvl = clamp(particle.bands[p.band] || 0, 0, 1); }
+        else { lvl = 0.22 + 0.18 * Math.sin(ts / 900 + (p.band || 0) * 0.9); }
+        var side = Math.max(3, Math.round(p.r * (1 + lvl * 1.8)));
+        var bx = Math.round(p.x - side / 2);
+        var by = Math.round(p.y - side / 2 + (lvl - 0.5) * 3);
+        ctx.fillStyle = 'hsla(' + Math.round(p.hue) + ',85%,68%,' + clamp(0.35 + lvl * 0.65, 0, 1).toFixed(2) + ')';
+        ctx.fillRect(bx, by, side, side);
+        continue;
+      }
       if (particle.type === 'rain') {
         ctx.strokeStyle = 'hsla(' + Math.round(p.hue) + ',80%,75%,' + alpha.toFixed(2) + ')';
         ctx.lineWidth = p.r;
@@ -861,7 +937,7 @@
     settings.particleType = type;
     saveSettings();
     rebuildParticles();
-    if (!silent) toast('粒子已切换：' + ({ stardust: '星尘', rain: '雨', snow: '雪', firefly: '萤火' }[type] || type));
+    if (!silent) toast('粒子已切换：' + ({ stardust: '星尘', rain: '雨', snow: '雪', firefly: '萤火', blocks: '方块' }[type] || type));
     var sel = $('sw4b-particle-type');
     if (sel) sel.value = type;
     return true;
@@ -873,7 +949,7 @@
     particle.sceneId = sc.id;
     if (ensureParticleDom() && particle.bg) particle.bg.style.background = sc.bg;
     setParticleType(sc.particle, true);
-    if (!silent) toast('场景已切换：' + sc.name + '（粒子：' + ({ stardust: '星尘', rain: '雨', snow: '雪', firefly: '萤火' }[sc.particle] || sc.particle) + '）');
+    if (!silent) toast('场景已切换：' + sc.name + '（粒子：' + ({ stardust: '星尘', rain: '雨', snow: '雪', firefly: '萤火', blocks: '方块' }[sc.particle] || sc.particle) + '）');
     var sel = $('sw4b-scene');
     if (sel) sel.value = sc.id;
     return sc;
@@ -884,6 +960,9 @@
       count: particle.parts.length, budget: +particle.budget.toFixed(2), frame: particle.frame,
       fpsEma: Math.round(particle.fpsEma), kick: +particle.kick.toFixed(2),
       spectrum: particle.spectrum, shotId: particle.shotId, shotLabel: particle.shotLabel,
+      audioActive: !!particle.audioActive,
+      bands: (particle.bands || []).map(function (v) { return +(+v || 0).toFixed(3); }),
+      bandEdges: BLOCK_EDGES.slice(),
       governorTier: (function () { try { return window.starwavePerfGovernor ? window.starwavePerfGovernor.tier : 'unknown'; } catch (e) { return 'unknown'; } })()
     };
   }
@@ -893,19 +972,24 @@
     { id: 'tuantuan', name: '团团', desc: '圆滚滚的黄色小团子，爱跟着节拍晃' },
     { id: 'fangfang', name: '方方', desc: '方形像素小家伙，头顶一根小天线' }
   ];
-  var petCv = null, petCtx = null;
+  var petCv = null, petCtx = null, petDpr = 1;
   function ensurePetDom() {
     if (petCv) return true;
     try {
       var cv = document.createElement('canvas');
       cv.id = 'sw4b-pet';
-      cv.width = 180; cv.height = 110;
-      cv.style.cssText = 'position:fixed;left:14px;bottom:118px;z-index:6;pointer-events:auto;cursor:pointer;';
+      /* 2026-11-11 发糊修复：旧写法后备分辨率固定 180×110，CSS 尺寸也是 180×110，
+         DPR=3 的手机上合成器放大 3 倍显示，宠物（尤其方形宠物方方）糊；
+         改为按 min(dpr,3) 配后备分辨率，CSS 尺寸保持 180×110 不变。 */
+      petDpr = Math.min(window.devicePixelRatio || 1, 3);
+      cv.width = Math.round(180 * petDpr); cv.height = Math.round(110 * petDpr);
+      cv.style.cssText = 'position:fixed;left:14px;bottom:118px;z-index:6;pointer-events:auto;cursor:pointer;width:180px;height:110px;';
       cv.title = '听歌宠物：点击切换形象';
       cv.addEventListener('click', function () { cyclePet(); });
       document.body.appendChild(cv);
       petCv = cv;
       petCtx = cv.getContext('2d');
+      petCtx.setTransform(petDpr, 0, 0, petDpr, 0, 0);
       return true;
     } catch (e) { return false; }
   }
@@ -916,6 +1000,7 @@
   function drawPet() {
     if (!settings.petEnabled || !petCv || !petCtx) return;
     var ctx = petCtx;
+    ctx.setTransform(petDpr, 0, 0, petDpr, 0, 0);
     ctx.clearRect(0, 0, 180, 110);
     /* 沿播放进度爬行：x = 进度 × 轨道宽 */
     var prog = 0, playing = false;
@@ -1451,7 +1536,7 @@
     body.innerHTML = '<h3>高级粒子 · 3D 场景 · 段落镜头</h3>' +
       '<p class="sw4b-note">粒子数按帧率自适应（接 Phase 2 性能总督：当前档位 ' + esc(ps.governorTier) + '）；Kick 触发与频谱映射复用 Phase 3 的节拍/频谱数据；镜头按歌曲段落自动切换。</p>' +
       '<div class="sw4b-row"><span>粒子形态</span><span><select id="sw4b-particle-type">' +
-      [['stardust', '星尘'], ['rain', '雨'], ['snow', '雪'], ['firefly', '萤火']].map(function (o) { return '<option value="' + o[0] + '"' + (settings.particleType === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') +
+      [['blocks', '方块'], ['stardust', '星尘'], ['rain', '雨'], ['snow', '雪'], ['firefly', '萤火']].map(function (o) { return '<option value="' + o[0] + '"' + (settings.particleType === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') +
       '</select></span></div>' +
       '<div class="sw4b-row"><span>场景包</span><span><select id="sw4b-scene">' +
       SCENES.map(function (s) { return '<option value="' + s.id + '"' + (settings.sceneId === s.id ? ' selected' : '') + '>' + s.name + '</option>'; }).join('') +

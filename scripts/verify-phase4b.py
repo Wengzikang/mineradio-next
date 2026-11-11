@@ -346,11 +346,13 @@ def main():
         ps = page.evaluate("() => window.starwavePhase4b.particles.state()")
         if not check('E.particles_running', bool(ps and ps['running'] and ps['count'] > 0 and 0.1 <= ps['budget'] <= 1.0), ps):
             failures += 1
-        for typ in ['rain', 'snow', 'firefly', 'stardust']:
+        for typ in ['rain', 'snow', 'firefly', 'stardust', 'blocks']:
             st = page.evaluate("(t) => { window.starwavePhase4b.particles.setType(t); return window.starwavePhase4b.particles.state(); }", typ)
             if not check('E.particle_type_' + typ, bool(st and st['type'] == typ and st['count'] > 0), st):
                 failures += 1
-        for sc, expect in [('ocean', 'firefly'), ('rainy', 'rain'), ('starry', 'stardust')]:
+        # 2026-11-11 blur fix: starry scene now maps to 'blocks' (was 'stardust');
+        # blocks is the new default particle type.
+        for sc, expect in [('ocean', 'firefly'), ('rainy', 'rain'), ('starry', 'blocks')]:
             st = page.evaluate("(s) => { window.starwavePhase4b.scenes.apply(s); return window.starwavePhase4b.particles.state(); }", sc)
             if not check('E.scene_' + sc, bool(st and st['sceneId'] == sc and st['type'] == expect), st):
                 failures += 1

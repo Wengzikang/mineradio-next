@@ -3916,7 +3916,9 @@ function installRenderPowerHooks() {
 var scene = new THREE.Scene();
 scene.background = null;
 var camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 100);
-var RENDER_DPR_CAP = 1.35;
+/* 2026-11-11 发糊修复：旧上限 1.35 让 DPR=3 的手机把全屏 3D 背景以 1.35 倍渲染再放大 2.2 倍显示，整站发糊；
+   上限提到 3（常见手机 DPR），大屏仍由 RENDER_PIXEL_BUDGET 兜底；eco/balanced 两档保持原值（用户低画质选择与性能总督降级台阶）。 */
+var RENDER_DPR_CAP = 3;
 var RENDER_PIXEL_BUDGET = 5200000;
 var RENDER_MIN_DPR = 0.72;
 // 0 = display vsync. Keep visible playback high-refresh capable instead of capping 120Hz+ screens to 60/72.
@@ -3934,7 +3936,7 @@ function renderQualityProfile() {
   var quality = normalizePerformanceQuality(fx && fx.performanceQuality);
   if (quality === 'eco') return { cap: 0.95, min: 0.56, budget: 2400000 };
   if (quality === 'balanced') return { cap: 1.12, min: 0.66, budget: 3800000 };
-  if (quality === 'ultra') return { cap: 1.75, min: 0.85, budget: 7800000 };
+  if (quality === 'ultra') return { cap: 3, min: 0.85, budget: 7800000 };
   return { cap: RENDER_DPR_CAP, min: RENDER_MIN_DPR, budget: RENDER_PIXEL_BUDGET };
 }
 function getRenderPixelRatio() {
@@ -26671,7 +26673,7 @@ function idleGuideWheel(e) {
 }
 function resizeIdleGuideCanvas() {
   if (!idleGuideCanvas) return;
-  idleGuideDpr = Math.min(window.devicePixelRatio || 1, 1.6);
+  idleGuideDpr = Math.min(window.devicePixelRatio || 1, 3); /* 2026-11-11 发糊修复：旧上限 1.6，DPR=3 手机上放大 1.9 倍发糊 */
   idleGuideW = window.innerWidth;
   idleGuideH = window.innerHeight;
   idleGuideCanvas.width = Math.max(1, Math.floor(idleGuideW * idleGuideDpr));
